@@ -53,7 +53,7 @@ export class AuthService implements OnModuleInit {
   private async seedDefaultAdmin() {
     try {
       const usersCol = this.db.getCollection<UserDocument>('users');
-      const adminEmail = process.env.ADMIN_EMAIL || 'admin@justmobile.com.au';
+      const adminEmail = process.env.ADMIN_EMAIL || 'devs@neximet.com';
       const existingAdmin = await usersCol.findOne({ email: adminEmail });
 
       if (!existingAdmin) {
