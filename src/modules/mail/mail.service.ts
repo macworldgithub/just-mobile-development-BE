@@ -44,7 +44,7 @@ export class MailService {
       this.initTransporter();
     }
 
-    const fromEmail = process.env.SMTP_USER || 'justmobile@justagency.com.au';
+    const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@justmobile.com.au';
     const sender = `"JustMobile Security" <${fromEmail}>`;
     const nameGreeting = recipientName ? `Hi ${recipientName},` : 'Hello,';
 

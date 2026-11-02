@@ -53,11 +53,16 @@ export class AuthService implements OnModuleInit {
   private async seedDefaultAdmin() {
     try {
       const usersCol = this.db.getCollection<UserDocument>('users');
-      const adminEmail = 'admin@justmobile.com.au';
+      const adminEmail = process.env.ADMIN_EMAIL || 'admin@justmobile.com.au';
       const existingAdmin = await usersCol.findOne({ email: adminEmail });
 
       if (!existingAdmin) {
-        const passwordHash = await bcrypt.hash('AdminJustMobile2026!', 10);
+        const initialPassword = process.env.ADMIN_INITIAL_PASSWORD;
+        if (!initialPassword) {
+          this.logger.log('ADMIN_INITIAL_PASSWORD not defined in environment; skipping admin seeding.');
+          return;
+        }
+        const passwordHash = await bcrypt.hash(initialPassword, 10);
         await usersCol.insertOne({
           name: 'JustMobile Administrator',
           email: adminEmail,
