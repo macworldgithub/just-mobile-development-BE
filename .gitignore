@@ -34,4 +34,13 @@ Thumbs.db
 # Environment
 .env
 .env.*
-!.env.example
+*.env
+
+# Service Account Keys & Secrets
+cedar-binder-*.json
+*.pem
+*.key
+
+# Seed & temporary scripts
+seed*.js
+test-*.js
