@@ -7,6 +7,7 @@ import { FaqsModule } from './modules/faqs/faqs.module';
 import { ChatModule } from './modules/chat/chat.module';
 import { MailModule } from './modules/mail/mail.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { CarrierModule } from './modules/carrier/carrier.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { AuthModule } from './modules/auth/auth.module';
       envFilePath: '.env',
     }),
     DatabaseModule,
+    CarrierModule,
     MailModule,
     AuthModule,
     HandsetsModule,
