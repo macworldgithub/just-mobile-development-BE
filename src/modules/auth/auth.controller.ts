@@ -26,10 +26,20 @@ export class AuthController {
   async signup(
     @Body()
     body: {
-      name: string;
+      firstName?: string;
+      surname?: string;
+      name?: string;
       email: string;
       password?: string;
       phone?: string;
+      dob?: string;
+      address?: string;
+      suburb?: string;
+      state?: string;
+      postcode?: string;
+      custType?: 'R' | 'B';
+      company?: string;
+      abn?: string;
       code: string;
     },
   ) {
@@ -41,7 +51,9 @@ export class AuthController {
   async login(
     @Body()
     body: {
-      email: string;
+      email?: string;
+      custNo?: string;
+      identifier?: string;
       password?: string;
       code?: string;
       portal?: 'customer' | 'admin';

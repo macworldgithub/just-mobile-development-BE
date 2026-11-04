@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { MailService } from '../mail/mail.service';
+import { CarrierService } from '../carrier/carrier.service';
 import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
 import { ObjectId } from 'mongodb';
@@ -16,9 +17,20 @@ import { ObjectId } from 'mongodb';
 export interface UserDocument {
   _id?: ObjectId;
   name: string;
+  firstName?: string;
+  surname?: string;
   email: string;
   passwordHash?: string;
   phone?: string;
+  dob?: string;
+  address?: string;
+  suburb?: string;
+  state?: string;
+  postcode?: string;
+  custType?: 'R' | 'B';
+  company?: string;
+  abn?: string;
+  custNo?: string;
   role: 'customer' | 'admin';
   isEmailVerified: boolean;
   createdAt: Date;
@@ -44,6 +56,7 @@ export class AuthService implements OnModuleInit {
   constructor(
     private readonly db: DatabaseService,
     private readonly mailService: MailService,
+    private readonly carrierService: CarrierService,
   ) {}
 
   async onModuleInit() {
@@ -121,23 +134,43 @@ export class AuthService implements OnModuleInit {
   }
 
   async signup(dto: {
-    name: string;
+    firstName?: string;
+    surname?: string;
+    name?: string;
     email: string;
     password?: string;
     phone?: string;
+    dob?: string;
+    address?: string;
+    suburb?: string;
+    state?: string;
+    postcode?: string;
+    custType?: 'R' | 'B';
+    company?: string;
+    abn?: string;
     code: string;
   }) {
     const email = dto.email.trim().toLowerCase();
-    const { name, password, phone, code } = dto;
+    const { password, code } = dto;
 
-    if (!name || name.trim().length < 2) {
-      throw new BadRequestException('Please provide your full name.');
+    const firstName = (dto.firstName || (dto.name ? dto.name.trim().split(' ')[0] : '')).trim();
+    const surname = (dto.surname || (dto.name ? dto.name.trim().split(' ').slice(1).join(' ') : 'Customer')).trim() || 'Customer';
+    const fullName = `${firstName} ${surname}`.trim() || dto.name || 'JustMobile Customer';
+
+    if (!firstName || firstName.length < 2) {
+      throw new BadRequestException('Please provide your first name (minimum 2 characters).');
+    }
+    if (!surname || surname.length < 2) {
+      throw new BadRequestException('Please provide your last name / surname (minimum 2 characters).');
     }
     if (!email || !email.includes('@')) {
-      throw new BadRequestException('Please provide a valid email.');
+      throw new BadRequestException('Please provide a valid email address.');
     }
     if (!code || code.trim().length !== 6) {
       throw new BadRequestException('A valid 6-digit verification code is required.');
+    }
+    if (!password || password.length < 6) {
+      throw new BadRequestException('Password must be at least 6 characters long.');
     }
 
     const usersCol = this.db.getCollection<UserDocument>('users');
@@ -162,19 +195,44 @@ export class AuthService implements OnModuleInit {
     // Mark code as used
     await verificationsCol.updateOne({ _id: verification._id }, { $set: { used: true } });
 
-    let passwordHash: string | undefined;
-    if (password && password.length >= 6) {
-      passwordHash = await bcrypt.hash(password, 10);
-    } else {
-      throw new BadRequestException('Password must be at least 6 characters long.');
-    }
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // ------------------------------------------------------------------
+    // Telco Carrier Customer Creation (Native CarrierService)
+    // ------------------------------------------------------------------
+    const carrierRes = await this.carrierService.addCustomer({
+      firstName,
+      surname,
+      email,
+      phone: dto.phone || '0400000000',
+      dob: dto.dob || '1995-01-01',
+      address: dto.address || 'Address pending',
+      suburb: dto.suburb || 'Sydney',
+      state: dto.state || 'NSW',
+      postcode: dto.postcode || '2000',
+      custType: dto.custType || 'R',
+      company: dto.custType === 'B' && dto.company ? dto.company : `${firstName} ${surname}`,
+      abn: dto.abn,
+    });
+    const custNo = carrierRes.custNo;
 
     const now = new Date();
     const newUser: UserDocument = {
-      name: name.trim(),
+      name: fullName,
+      firstName,
+      surname,
       email,
       passwordHash,
-      phone: phone?.trim() || '',
+      phone: dto.phone?.trim() || '',
+      dob: dto.dob?.trim() || '',
+      address: dto.address?.trim() || '',
+      suburb: dto.suburb?.trim() || '',
+      state: dto.state?.trim() || '',
+      postcode: dto.postcode?.trim() || '',
+      custType: dto.custType || 'R',
+      company: dto.company?.trim(),
+      abn: dto.abn?.trim(),
+      custNo,
       role: 'customer',
       isEmailVerified: true,
       createdAt: now,
@@ -185,8 +243,15 @@ export class AuthService implements OnModuleInit {
     const insertResult = await usersCol.insertOne(newUser);
     const userId = insertResult.insertedId.toString();
 
+    // Send decorated welcome email with Customer Number (custNo)
+    try {
+      await this.mailService.sendCustomerWelcomeEmail(email, custNo, firstName);
+    } catch (err: any) {
+      this.logger.warn(`Could not dispatch welcome email to ${email}: ${err.message}`);
+    }
+
     const token = jwt.sign(
-      { sub: userId, email: newUser.email, role: newUser.role, name: newUser.name },
+      { sub: userId, email: newUser.email, role: newUser.role, name: newUser.name, custNo },
       this.jwtSecret,
       { expiresIn: '7d' },
     );
@@ -198,48 +263,77 @@ export class AuthService implements OnModuleInit {
       user: {
         id: userId,
         name: newUser.name,
+        firstName: newUser.firstName,
+        surname: newUser.surname,
         email: newUser.email,
         phone: newUser.phone,
+        custNo: newUser.custNo,
         role: newUser.role,
       },
     };
   }
 
   async login(dto: {
-    email: string;
+    custNo?: string;
+    identifier?: string;
+    email?: string;
     password?: string;
     code?: string;
     portal?: 'customer' | 'admin';
   }) {
-    const email = dto.email.trim().toLowerCase();
     const portal = dto.portal || 'customer';
+    const identifier = (dto.custNo || dto.identifier || dto.email || '').trim();
 
-    if (!email) {
-      throw new BadRequestException('Email address is required.');
-    }
-
-    const usersCol = this.db.getCollection<UserDocument>('users');
-    const user = await usersCol.findOne({ email });
-
-    if (!user) {
-      if (portal === 'admin') {
-        throw new UnauthorizedException('Invalid credentials.');
-      }
-      throw new NotFoundException('Account not found with this email. Please sign up.');
-    }
-
-    // Role check for Admin Portal
-    if (portal === 'admin' && user.role !== 'admin') {
-      throw new UnauthorizedException(
-        'Access denied. Administrator privileges are required to access the JustMobile Admin Portal.',
+    if (!identifier) {
+      throw new BadRequestException(
+        portal === 'admin'
+          ? 'Admin email address is required.'
+          : 'Please enter your Customer Number.',
       );
     }
 
-    // Validate either Code or Password
+    const usersCol = this.db.getCollection<UserDocument>('users');
+    let user: UserDocument | null = null;
+
+    if (portal === 'admin') {
+      user = await usersCol.findOne({ email: identifier.toLowerCase() });
+      if (!user) {
+        throw new UnauthorizedException('Invalid credentials.');
+      }
+      if (user.role !== 'admin') {
+        throw new UnauthorizedException(
+          'Access denied. Administrator privileges are required to access the JustMobile Admin Portal.',
+        );
+      }
+    } else {
+      // Customer Portal: support login by custNo (e.g. CUST697855) or email
+      const isEmail = identifier.includes('@');
+      if (isEmail) {
+        user = await usersCol.findOne({ email: identifier.toLowerCase() });
+      } else {
+        const cleanCustNo = identifier.toUpperCase().replace(/\s+/g, '');
+        const escaped = cleanCustNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        user = await usersCol.findOne({
+          $or: [
+            { custNo: cleanCustNo },
+            { custNo: { $regex: new RegExp(`^${escaped}$`, 'i') } },
+            { email: identifier.toLowerCase() },
+          ],
+        });
+      }
+
+      if (!user) {
+        throw new NotFoundException(
+          'Account not found with this Customer Number. Please check your Customer ID or sign up.',
+        );
+      }
+    }
+
+    // Validate credentials: password or one-time code
     if (dto.code) {
       const verificationsCol = this.db.getCollection<VerificationDocument>('email_verifications');
       const verification = await verificationsCol.findOne({
-        email,
+        email: user.email,
         code: dto.code.trim(),
         used: false,
         expiresAt: { $gt: new Date() },
@@ -251,14 +345,14 @@ export class AuthService implements OnModuleInit {
       await verificationsCol.updateOne({ _id: verification._id }, { $set: { used: true } });
     } else if (dto.password) {
       if (!user.passwordHash) {
-        throw new BadRequestException('No password set for this account. Please log in with email code.');
+        throw new BadRequestException('No password set for this account. Please sign in with email code.');
       }
       const isMatch = await bcrypt.compare(dto.password, user.passwordHash);
       if (!isMatch) {
-        throw new UnauthorizedException('Incorrect password.');
+        throw new UnauthorizedException('Incorrect password. Please verify your credentials.');
       }
     } else {
-      throw new BadRequestException('Please provide your password or verification code.');
+      throw new BadRequestException('Please provide your password.');
     }
 
     // Update lastLoginAt
@@ -278,8 +372,11 @@ export class AuthService implements OnModuleInit {
       user: {
         id: userId,
         name: user.name,
+        firstName: user.firstName,
+        surname: user.surname,
         email: user.email,
         phone: user.phone || '',
+        custNo: user.custNo,
         role: user.role,
       },
     };
@@ -305,8 +402,11 @@ export class AuthService implements OnModuleInit {
         user: {
           id: user._id!.toString(),
           name: user.name,
+          firstName: user.firstName,
+          surname: user.surname,
           email: user.email,
           phone: user.phone || '',
+          custNo: user.custNo,
           role: user.role,
           createdAt: user.createdAt,
           lastLoginAt: user.lastLoginAt,
