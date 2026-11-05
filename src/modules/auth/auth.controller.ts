@@ -62,6 +62,20 @@ export class AuthController {
     return this.authService.login(body);
   }
 
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  async forgotPassword(@Body() body: { identifier: string }) {
+    return this.authService.forgotPassword(body.identifier);
+  }
+
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  async resetPassword(
+    @Body() body: { identifier: string; code: string; newPassword: string },
+  ) {
+    return this.authService.resetPassword(body);
+  }
+
   @Get('me')
   async getMe(@Headers('authorization') authHeader?: string) {
     return this.authService.getMe(authHeader);

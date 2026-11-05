@@ -382,6 +382,139 @@ export class AuthService implements OnModuleInit {
     };
   }
 
+  /**
+   * Request Password Reset Code via Hostinger SMTP
+   */
+  async forgotPassword(identifierRaw: string) {
+    const identifier = (identifierRaw || '').trim();
+    if (!identifier) {
+      throw new BadRequestException('Please enter your Customer Number or registered email.');
+    }
+
+    const usersCol = this.db.getCollection<UserDocument>('users');
+    let user: UserDocument | null = null;
+
+    if (identifier.includes('@')) {
+      user = await usersCol.findOne({ email: identifier.toLowerCase() });
+    } else {
+      const cleanCustNo = identifier.toUpperCase().replace(/\s+/g, '');
+      const escaped = cleanCustNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      user = await usersCol.findOne({
+        $or: [
+          { custNo: cleanCustNo },
+          { custNo: { $regex: new RegExp(`^${escaped}$`, 'i') } },
+          { email: identifier.toLowerCase() },
+        ],
+      });
+    }
+
+    if (!user) {
+      throw new NotFoundException('No account found with this Customer Number or email address.');
+    }
+
+    // Generate secure 6-digit reset code
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    const verificationsCol = this.db.getCollection<VerificationDocument>('email_verifications');
+    await verificationsCol.insertOne({
+      email: user.email,
+      code,
+      type: 'reset',
+      expiresAt,
+      used: false,
+      createdAt: new Date(),
+    });
+
+    // Send reset email via Hostinger SMTP
+    await this.mailService.sendPasswordResetEmail(user.email, code, user.firstName || user.name);
+
+    // Mask recipient email for privacy display (e.g., a***r@justmobile.com.au)
+    const emailParts = user.email.split('@');
+    const local = emailParts[0];
+    const domain = emailParts[1] || 'justmobile.com.au';
+    const maskedLocal = local.length > 2
+      ? `${local[0]}${'*'.repeat(local.length - 2)}${local[local.length - 1]}`
+      : `${local}***`;
+    const maskedEmail = `${maskedLocal}@${domain}`;
+
+    return {
+      success: true,
+      maskedEmail,
+      message: `A 6-digit password reset code has been sent to your registered email (${maskedEmail}).`,
+    };
+  }
+
+  /**
+   * Complete Password Reset with 6-digit code
+   */
+  async resetPassword(dto: { identifier: string; code: string; newPassword: string }) {
+    const identifier = (dto.identifier || '').trim();
+    const code = (dto.code || '').trim();
+    const newPassword = dto.newPassword;
+
+    if (!identifier) {
+      throw new BadRequestException('Please provide your Customer Number or email.');
+    }
+    if (!code || code.length !== 6) {
+      throw new BadRequestException('Please enter the valid 6-digit reset code sent to your email.');
+    }
+    if (!newPassword || newPassword.length < 6) {
+      throw new BadRequestException('Password must be at least 6 characters long.');
+    }
+
+    const usersCol = this.db.getCollection<UserDocument>('users');
+    let user: UserDocument | null = null;
+
+    if (identifier.includes('@')) {
+      user = await usersCol.findOne({ email: identifier.toLowerCase() });
+    } else {
+      const cleanCustNo = identifier.toUpperCase().replace(/\s+/g, '');
+      const escaped = cleanCustNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      user = await usersCol.findOne({
+        $or: [
+          { custNo: cleanCustNo },
+          { custNo: { $regex: new RegExp(`^${escaped}$`, 'i') } },
+          { email: identifier.toLowerCase() },
+        ],
+      });
+    }
+
+    if (!user) {
+      throw new NotFoundException('Account not found.');
+    }
+
+    const verificationsCol = this.db.getCollection<VerificationDocument>('email_verifications');
+    const verification = await verificationsCol.findOne({
+      email: user.email,
+      code,
+      type: 'reset',
+      used: false,
+      expiresAt: { $gt: new Date() },
+    });
+
+    if (!verification) {
+      throw new BadRequestException('Invalid or expired reset code. Please request a new code.');
+    }
+
+    // Mark verification code as used
+    await verificationsCol.updateOne({ _id: verification._id }, { $set: { used: true } });
+
+    // Hash new password
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await usersCol.updateOne(
+      { _id: user._id },
+      { $set: { passwordHash, updatedAt: new Date() } },
+    );
+
+    this.logger.log(`✓ Password successfully reset for customer ${user.custNo || user.email}`);
+
+    return {
+      success: true,
+      message: 'Your password has been successfully reset. You can now log in with your new password.',
+    };
+  }
+
   async getMe(authHeader?: string) {
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       throw new UnauthorizedException('Authorization header is required.');
