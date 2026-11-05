@@ -616,6 +616,30 @@ export class CarrierService {
     };
   }
 
+  /**
+   * Get all orders for a customer (including in-flight mobile ports)
+   */
+  async getCustomerOrders(custNo: string): Promise<any[]> {
+    const ordersCol = this.db.getCollection<OrderRecord>('orders');
+    const orders = await ordersCol
+      .find({ custNo })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return orders.map((o) => ({
+      orderId: o.orderId,
+      custNo: o.custNo,
+      msn: o.msn,
+      status: o.status,
+      planName: o.planName,
+      orderType: o.orderType,
+      isEsim: o.isEsim,
+      createdAt: o.createdAt,
+      completedAt: (o as any).completedAt,
+      donorNetworkNote: (o as any).donorNetworkNote,
+    }));
+  }
+
   // ==========================================================================
   // 4. ESIM QR CODE GENERATION & DIGITAL ACTIVATION
   // ==========================================================================

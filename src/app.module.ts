@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { DatabaseModule } from './database/database.module';
 import { HandsetsModule } from './modules/handsets/handsets.module';
 import { PlansModule } from './modules/plans/plans.module';
@@ -15,6 +16,7 @@ import { CarrierModule } from './modules/carrier/carrier.module';
       isGlobal: true,
       envFilePath: '.env',
     }),
+    ScheduleModule.forRoot(),
     DatabaseModule,
     CarrierModule,
     MailModule,

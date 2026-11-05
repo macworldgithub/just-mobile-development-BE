@@ -1,10 +1,17 @@
-import { Controller, Post, Get, Param, Body, Query, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Get, Param, Body, Query, Res, HttpCode, HttpStatus } from '@nestjs/common';
+import type { Response } from 'express';
 import { CarrierService } from './carrier.service';
+import { InvoiceService } from './invoice.service';
+import { CarrierPortingWorker } from './carrier-porting.worker';
 import type { CarrierCustomerInput, ActivateOrderInput, ActivatePortOrderInput } from './carrier.service';
 
 @Controller('api/carrier')
 export class CarrierController {
-  constructor(private readonly carrierService: CarrierService) {}
+  constructor(
+    private readonly carrierService: CarrierService,
+    private readonly invoiceService: InvoiceService,
+    private readonly portingWorker: CarrierPortingWorker,
+  ) {}
 
   // ==========================================================================
   // CUSTOMER ENDPOINTS
@@ -36,6 +43,33 @@ export class CarrierController {
     return this.carrierService.getUnbilledUsage(custNo);
   }
 
+  @Get('customers/:custNo/orders')
+  async getCustomerOrders(@Param('custNo') custNo: string) {
+    return this.carrierService.getCustomerOrders(custNo);
+  }
+
+  // ==========================================================================
+  // TAX INVOICE ENDPOINTS (INT-08)
+  // ==========================================================================
+
+  @Get('customers/:custNo/invoices')
+  async getCustomerInvoices(@Param('custNo') custNo: string) {
+    return this.invoiceService.getCustomerInvoices(custNo);
+  }
+
+  @Get('customers/:custNo/invoices/:invoiceId/pdf')
+  async downloadInvoicePdf(
+    @Param('custNo') custNo: string,
+    @Param('invoiceId') invoiceId: string,
+    @Res() res: Response,
+  ) {
+    const pdfBuffer = await this.invoiceService.generateTaxInvoicePdf(custNo, invoiceId);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="JustMobile-Tax-Invoice-${invoiceId}.pdf"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.end(pdfBuffer);
+  }
+
   // ==========================================================================
   // NUMBER RESERVATION ENDPOINTS
   // ==========================================================================
@@ -52,7 +86,7 @@ export class CarrierController {
   }
 
   // ==========================================================================
-  // ORDER ACTIVATION ENDPOINTS
+  // ORDER ACTIVATION & PORTING WORKER ENDPOINTS (INT-10)
   // ==========================================================================
 
   @Post('orders/activate')
@@ -70,6 +104,12 @@ export class CarrierController {
   @Get('orders/:orderId')
   async queryOrder(@Param('orderId') orderId: string) {
     return this.carrierService.queryOrder(orderId);
+  }
+
+  @Post('orders/:orderId/sync-port')
+  @HttpCode(HttpStatus.OK)
+  async syncPortOrder(@Param('orderId') orderId: string) {
+    return this.portingWorker.forceSyncOrder(orderId);
   }
 
   // ==========================================================================
