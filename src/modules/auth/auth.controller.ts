@@ -55,6 +55,7 @@ export class AuthController {
       custNo?: string;
       identifier?: string;
       password?: string;
+      pin?: string;
       code?: string;
       portal?: 'customer' | 'admin';
     },

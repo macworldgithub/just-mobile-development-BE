@@ -21,6 +21,7 @@ export interface UserDocument {
   surname?: string;
   email: string;
   passwordHash?: string;
+  pin?: string;
   phone?: string;
   dob?: string;
   address?: string;
@@ -87,6 +88,14 @@ export class AuthService implements OnModuleInit {
           updatedAt: new Date(),
         });
         this.logger.log(`✓ Seeded default admin user (${adminEmail})`);
+      }
+
+      // Ensure test customer Alexander Wright (CUST882104) has PIN '1234' for PIN login testing
+      const alexander = await usersCol.findOne({ custNo: 'CUST882104' });
+      if (alexander && !alexander.pin) {
+        const hashedPin = await bcrypt.hash('1234', 10);
+        await usersCol.updateOne({ _id: alexander._id }, { $set: { pin: hashedPin } });
+        this.logger.log('✓ Configured legacy PIN 1234 for test customer CUST882104');
       }
     } catch (err: any) {
       this.logger.warn(`Could not seed default admin: ${err.message}`);
@@ -278,6 +287,7 @@ export class AuthService implements OnModuleInit {
     identifier?: string;
     email?: string;
     password?: string;
+    pin?: string;
     code?: string;
     portal?: 'customer' | 'admin';
   }) {
@@ -306,16 +316,20 @@ export class AuthService implements OnModuleInit {
         );
       }
     } else {
-      // Customer Portal: support login by custNo (e.g. CUST697855) or email
+      // Customer Portal: support login by custNo (e.g. CUST882104 or 512345) or email
       const isEmail = identifier.includes('@');
       if (isEmail) {
         user = await usersCol.findOne({ email: identifier.toLowerCase() });
       } else {
         const cleanCustNo = identifier.toUpperCase().replace(/\s+/g, '');
+        const numericPart = cleanCustNo.replace(/^CUST/i, '');
+        const withCustPrefix = `CUST${numericPart}`;
         const escaped = cleanCustNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         user = await usersCol.findOne({
           $or: [
             { custNo: cleanCustNo },
+            { custNo: numericPart },
+            { custNo: withCustPrefix },
             { custNo: { $regex: new RegExp(`^${escaped}$`, 'i') } },
             { email: identifier.toLowerCase() },
           ],
@@ -329,7 +343,7 @@ export class AuthService implements OnModuleInit {
       }
     }
 
-    // Validate credentials: password or one-time code
+    // Validate credentials: password, PIN or one-time code
     if (dto.code) {
       const verificationsCol = this.db.getCollection<VerificationDocument>('email_verifications');
       const verification = await verificationsCol.findOne({
@@ -343,16 +357,31 @@ export class AuthService implements OnModuleInit {
         throw new BadRequestException('Invalid or expired email verification code.');
       }
       await verificationsCol.updateOne({ _id: verification._id }, { $set: { used: true } });
-    } else if (dto.password) {
-      if (!user.passwordHash) {
-        throw new BadRequestException('No password set for this account. Please sign in with email code.');
+    } else if (dto.password || dto.pin) {
+      const secret = (dto.pin || dto.password)!.trim();
+      let isMatch = false;
+
+      // 1. Try standard password hash
+      if (user.passwordHash) {
+        isMatch = await bcrypt.compare(secret, user.passwordHash);
       }
-      const isMatch = await bcrypt.compare(dto.password, user.passwordHash);
+
+      // 2. Try legacy PIN hash (from mobile app or bele-app)
+      if (!isMatch && user.pin) {
+        isMatch = await bcrypt.compare(secret, user.pin);
+      }
+
       if (!isMatch) {
-        throw new UnauthorizedException('Incorrect password. Please verify your credentials.');
+        throw new UnauthorizedException(
+          dto.pin
+            ? 'Incorrect PIN. Please enter your 4-6 digit PIN or reset your credentials.'
+            : 'Incorrect password or PIN. Please verify your credentials.'
+        );
       }
     } else {
-      throw new BadRequestException('Please provide your password.');
+      throw new BadRequestException(
+        dto.pin !== undefined ? 'Please enter your PIN.' : 'Please provide your password or PIN.',
+      );
     }
 
     // Update lastLoginAt
@@ -459,8 +488,8 @@ export class AuthService implements OnModuleInit {
     if (!code || code.length !== 6) {
       throw new BadRequestException('Please enter the valid 6-digit reset code sent to your email.');
     }
-    if (!newPassword || newPassword.length < 6) {
-      throw new BadRequestException('Password must be at least 6 characters long.');
+    if (!newPassword || newPassword.length < 4) {
+      throw new BadRequestException('Password or PIN must be at least 4 characters long.');
     }
 
     const usersCol = this.db.getCollection<UserDocument>('users');
@@ -470,10 +499,14 @@ export class AuthService implements OnModuleInit {
       user = await usersCol.findOne({ email: identifier.toLowerCase() });
     } else {
       const cleanCustNo = identifier.toUpperCase().replace(/\s+/g, '');
+      const numericPart = cleanCustNo.replace(/^CUST/i, '');
+      const withCustPrefix = `CUST${numericPart}`;
       const escaped = cleanCustNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       user = await usersCol.findOne({
         $or: [
           { custNo: cleanCustNo },
+          { custNo: numericPart },
+          { custNo: withCustPrefix },
           { custNo: { $regex: new RegExp(`^${escaped}$`, 'i') } },
           { email: identifier.toLowerCase() },
         ],
@@ -500,11 +533,15 @@ export class AuthService implements OnModuleInit {
     // Mark verification code as used
     await verificationsCol.updateOne({ _id: verification._id }, { $set: { used: true } });
 
-    // Hash new password
+    // Hash new password & PIN
     const passwordHash = await bcrypt.hash(newPassword, 10);
+    const updatePayload: any = { passwordHash, updatedAt: new Date() };
+    if (/^\d{4,6}$/.test(newPassword.trim())) {
+      updatePayload.pin = passwordHash;
+    }
     await usersCol.updateOne(
       { _id: user._id },
-      { $set: { passwordHash, updatedAt: new Date() } },
+      { $set: updatePayload },
     );
 
     this.logger.log(`✓ Password successfully reset for customer ${user.custNo || user.email}`);
