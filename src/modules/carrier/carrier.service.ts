@@ -30,6 +30,8 @@ export interface ActivateOrderInput {
   planName?: string;
   pricePerMonth?: number;
   email?: string;
+  firstName?: string;
+  lastName?: string;
   address?: string;
   suburb?: string;
   state?: string;
@@ -255,14 +257,20 @@ export class CarrierService {
     if (process.env.TELCO_LIVE_CREATE !== 'true') {
       const ordersCol = this.db.getCollection<OrderRecord>('orders');
       const userOrders = await ordersCol.find({ custNo }).toArray();
+      const usersCol = this.db.getCollection('users');
+      const userDoc: any = await usersCol.findOne({
+        $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
+      });
 
       if (userOrders.length > 0) {
         return {
           services: userOrders.map((ord, idx) => ({
             serviceId: `SVC-${ord.orderId}`,
-            serviceNumber: ord.msn,
+            serviceNumber: ord.msn || userDoc?.phone || '0488 912 340',
             serviceType: ord.isEsim ? 'Mobile eSIM 5G' : 'Mobile 5G',
-            planName: ord.planName || '50GB Just right Plan',
+            planName: userDoc?.legacyData?.plan
+              ? `${userDoc.legacyData.plan} Mobile 5G (${userDoc.legacyData.dataLimitGb || 5}GB)`
+              : ord.planName || '50GB Just right Plan',
             status: ord.status,
             lineSeqNo: String(idx + 1),
           })),
@@ -273,9 +281,11 @@ export class CarrierService {
         services: [
           {
             serviceId: 'SVC-JM-882104',
-            serviceNumber: '0488 912 340',
+            serviceNumber: userDoc?.phone || '0488 912 340',
             serviceType: 'Mobile eSIM 5G',
-            planName: '50GB Just right Plan',
+            planName: userDoc?.legacyData?.plan
+              ? `${userDoc.legacyData.plan} Mobile 5G (${userDoc.legacyData.dataLimitGb || 5}GB)`
+              : '50GB Just right Plan',
             status: 'Active',
             lineSeqNo: '1',
           },
@@ -399,6 +409,8 @@ export class CarrierService {
     status: string;
     isEsim: boolean;
     lpaString: string;
+    emailSent?: boolean;
+    emailRecipient?: string;
   }> {
     const msn = dto.msn.replace(/\s+/g, '');
     const planNo = dto.planNo || '13369';
@@ -483,17 +495,19 @@ export class CarrierService {
     );
 
     // Automated eSIM Welcome Email via Hostinger SMTP (INT-07)
+    let recipientEmail = dto.email;
     try {
-      let recipientEmail = dto.email;
-      let recipientName: string | undefined;
+      let recipientName: string | undefined = dto.firstName && dto.lastName ? `${dto.firstName} ${dto.lastName}` : dto.firstName;
 
-      if (!recipientEmail || !recipientEmail.includes('@')) {
+      if (!recipientEmail || !recipientEmail.includes('@') || !recipientName) {
         const usersCol = this.db.getCollection('users');
         const user = await usersCol.findOne({
           $or: [{ custNo: dto.custNo }, { custNo: parseInt(dto.custNo.replace(/\D+/g, ''), 10) }],
         });
-        if (user?.email) {
+        if (user?.email && !recipientEmail) {
           recipientEmail = user.email;
+        }
+        if (user?.name && !recipientName) {
           recipientName = user.name;
         }
       }
@@ -524,6 +538,8 @@ export class CarrierService {
       status: 'ACTIVE',
       isEsim: true,
       lpaString,
+      emailSent: Boolean(recipientEmail),
+      emailRecipient: recipientEmail,
     };
   }
 
@@ -537,6 +553,8 @@ export class CarrierService {
     status: string;
     isEsim: boolean;
     lpaString: string;
+    emailSent?: boolean;
+    emailRecipient?: string;
   }> {
     const msn = dto.msn.replace(/\s+/g, '');
     const planNo = dto.planNo || '13369';
@@ -623,17 +641,19 @@ export class CarrierService {
     );
 
     // Automated eSIM Welcome Email via Hostinger SMTP (INT-07)
+    let recipientEmail = dto.email;
     try {
-      let recipientEmail = dto.email;
-      let recipientName: string | undefined;
+      let recipientName: string | undefined = dto.firstName && dto.lastName ? `${dto.firstName} ${dto.lastName}` : dto.firstName;
 
-      if (!recipientEmail || !recipientEmail.includes('@')) {
+      if (!recipientEmail || !recipientEmail.includes('@') || !recipientName) {
         const usersCol = this.db.getCollection('users');
         const user = await usersCol.findOne({
           $or: [{ custNo: dto.custNo }, { custNo: parseInt(dto.custNo.replace(/\D+/g, ''), 10) }],
         });
-        if (user?.email) {
+        if (user?.email && !recipientEmail) {
           recipientEmail = user.email;
+        }
+        if (user?.name && !recipientName) {
           recipientName = user.name;
         }
       }
@@ -664,6 +684,8 @@ export class CarrierService {
       status: 'PORT_IN_PROGRESS',
       isEsim: true,
       lpaString,
+      emailSent: Boolean(recipientEmail),
+      emailRecipient: recipientEmail,
     };
   }
 
@@ -1087,19 +1109,35 @@ export class CarrierService {
       }
     }
 
-    // Check if customer has an updated plan from orders collection
+    // Check customer metadata & orders for exact plan & usage
     const ordersCol = this.db.getCollection<OrderRecord>('orders');
     const latestOrder = await ordersCol.findOne(
       { custNo },
       { sort: { updatedAt: -1 } },
     );
+    const usersCol = this.db.getCollection('users');
+    const userDoc: any = await usersCol.findOne({
+      $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
+    });
 
     let planTotalGb = 50;
     let bankedMaxGb = 500;
     let dataUsedGb = 7.6;
     let bankedDataGb = 148.2;
+    let periodEnd = '2026-11-27';
+    let daysRemaining = 23;
 
-    if (latestOrder?.planName) {
+    if (userDoc?.legacyData?.dataLimitGb) {
+      planTotalGb = userDoc.legacyData.dataLimitGb;
+      dataUsedGb = userDoc.legacyData.dataUsedGb ?? 0.8;
+      bankedMaxGb = Math.max(50, planTotalGb * 10);
+      bankedDataGb = 15.0;
+      if (userDoc.legacyData.expiry) {
+        periodEnd = userDoc.legacyData.expiry;
+        const exp = new Date(periodEnd);
+        daysRemaining = Math.max(1, Math.ceil((exp.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+      }
+    } else if (latestOrder?.planName) {
       if (latestOrder.planName.includes('20GB') || latestOrder.planName.includes('Just enough')) {
         planTotalGb = 20;
         bankedMaxGb = 200;
@@ -1118,7 +1156,7 @@ export class CarrierService {
       }
     }
 
-    const dataRemainingGb = Number((planTotalGb - dataUsedGb).toFixed(1));
+    const dataRemainingGb = Number(Math.max(0, planTotalGb - dataUsedGb).toFixed(1));
     const percentRemaining = Number(((dataRemainingGb / planTotalGb) * 100).toFixed(1));
 
     return {
@@ -1126,8 +1164,8 @@ export class CarrierService {
       billingCycle: '28th of every month',
       cycleDetails: {
         periodStart: '2026-10-28',
-        periodEnd: '2026-11-27',
-        daysRemaining: 23,
+        periodEnd,
+        daysRemaining,
       },
       dataMeter: {
         planTotalGb,
@@ -1165,18 +1203,29 @@ export class CarrierService {
       { custNo },
       { sort: { updatedAt: -1 } },
     );
-    const nextAmount = latestOrder?.pricePerMonth || 25.0;
+    const usersCol = this.db.getCollection('users');
+    const userDoc: any = await usersCol.findOne({
+      $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
+    });
+
+    const isStarter = userDoc?.legacyData?.plan === 'Starter';
+    const nextAmount = isStarter ? 19.0 : (latestOrder?.pricePerMonth || 25.0);
+    const lastAmount = isStarter ? 19.0 : 25.0;
+
+    const paymentMethod = custNo === 'CUST882104'
+      ? 'Mastercard ending in 4192'
+      : `Visa Debit ending in ${custNo.slice(-4) || '0481'}`;
 
     return {
       custNo,
       currentBalance: 0.0,
       formattedBalance: '$0.00',
-      lastInvoiceAmount: 25.0,
+      lastInvoiceAmount: lastAmount,
       lastInvoiceDate: '2026-10-28',
       nextInvoiceDate: '2026-11-28',
       nextInvoiceAmount: nextAmount,
       autoPayStatus: 'Active',
-      paymentMethod: 'Mastercard ending in 4192',
+      paymentMethod,
     };
   }
 }

@@ -36,7 +36,25 @@ export class InvoiceService {
       return existing;
     }
 
-    // Default seeded invoices matching billing cycle on 28th
+    // Lookup customer and plan to generate accurate amounts
+    const usersCol = this.db.getCollection('users');
+    const userDoc: any = await usersCol.findOne({
+      $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
+    });
+
+    const isStarter = userDoc?.legacyData?.plan === 'Starter';
+    const amount = isStarter ? 19.0 : 25.0;
+    const gstAmount = Number((amount / 11).toFixed(2));
+    const subtotal = Number((amount - gstAmount).toFixed(2));
+    const planName = isStarter
+      ? 'Starter Mobile 5G (5GB) (Telstra Wholesale 5G)'
+      : '50GB Just right Plan (Telstra Wholesale 5G)';
+    const dataAllowance = isStarter ? '5 GB (15 GB Data Bank)' : '50 GB (500 GB Data Bank)';
+    const paymentMethod = custNo === 'CUST882104'
+      ? 'Mastercard ending in 4192 (Auto-Pay)'
+      : `Visa Debit ending in ${custNo.slice(-4) || '0342'} (Auto-Pay)`;
+
+    // Default invoices matching billing cycle on 28th
     const sampleInvoices: InvoiceRecord[] = [
       {
         invoiceId: `INV-2026-10-${custNo.replace(/\D/g, '') || '882104'}`,
@@ -45,13 +63,13 @@ export class InvoiceService {
         dueDate: '2026-11-28',
         periodStart: '2026-10-28',
         periodEnd: '2026-11-27',
-        planName: '50GB Just right Plan (Telstra Wholesale 5G)',
-        dataAllowance: '50 GB (500 GB Data Bank)',
-        subtotal: 22.73,
-        gstAmount: 2.27,
-        amount: 25.0,
+        planName,
+        dataAllowance,
+        subtotal,
+        gstAmount,
+        amount,
         status: 'PAID',
-        paymentMethod: 'Mastercard ending in 4192 (Auto-Pay)',
+        paymentMethod,
         transactionRef: `TXN-QS-${custNo.replace(/\D/g, '') || '882104'}-OCT`,
       },
       {
@@ -61,13 +79,13 @@ export class InvoiceService {
         dueDate: '2026-10-28',
         periodStart: '2026-09-28',
         periodEnd: '2026-10-27',
-        planName: '50GB Just right Plan (Telstra Wholesale 5G)',
-        dataAllowance: '50 GB (500 GB Data Bank)',
-        subtotal: 22.73,
-        gstAmount: 2.27,
-        amount: 25.0,
+        planName,
+        dataAllowance,
+        subtotal,
+        gstAmount,
+        amount,
         status: 'PAID',
-        paymentMethod: 'Mastercard ending in 4192 (Auto-Pay)',
+        paymentMethod,
         transactionRef: `TXN-QS-${custNo.replace(/\D/g, '') || '882104'}-SEP`,
       },
     ];
@@ -182,7 +200,7 @@ export class InvoiceService {
         doc.fillColor('#697866').fontSize(8).font('Helvetica-Bold');
         doc.text('BILLING PERIOD:', metaBoxX, y + 50);
         doc.fillColor('#142420').fontSize(8).font('Helvetica');
-        doc.text('28 Oct – 27 Nov 2026', metaBoxX + 90, y + 50);
+        doc.text(`${targetInvoice.periodStart} – ${targetInvoice.periodEnd}`, metaBoxX + 90, y + 50);
 
         doc.fillColor('#697866').fontSize(8).font('Helvetica-Bold');
         doc.text('ACCOUNT STATUS:', metaBoxX, y + 66);
@@ -224,7 +242,7 @@ export class InvoiceService {
 
         doc.fillColor('#58615F').fontSize(8).font('Helvetica');
         doc.text('• Unlimited standard AU calls, SMS & MMS (Telstra Wholesale 5G)', 55, y + 23);
-        doc.text('• 500GB Data Banking reserve with automatic month-to-month rollover', 55, y + 35);
+        doc.text(`• ${targetInvoice.dataAllowance || 'Data Banking'} with automatic month-to-month rollover`, 55, y + 35);
 
         doc.fillColor('#142420').fontSize(8).font('Helvetica');
         doc.text('28/10–27/11', 310, y + 10);

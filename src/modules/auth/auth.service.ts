@@ -602,6 +602,15 @@ export class AuthService implements OnModuleInit {
       .limit(50)
       .toArray();
 
+    const ordersCol = this.db.getCollection('orders');
+    const allOrders = await ordersCol.find({}).toArray();
+    const ordersByCust = new Map<string, any>();
+    allOrders.forEach((o: any) => {
+      if (o.custNo) {
+        ordersByCust.set(o.custNo.toString(), o);
+      }
+    });
+
     return {
       success: true,
       stats: {
@@ -610,15 +619,40 @@ export class AuthService implements OnModuleInit {
         smtpConfigured: Boolean(process.env.SMTP_USER),
         smtpHost: process.env.SMTP_HOST || 'smtp.hostinger.com',
       },
-      customers: customers.map((c) => ({
-        id: c._id!.toString(),
-        name: c.name,
-        email: c.email,
-        phone: c.phone,
-        role: c.role,
-        createdAt: c.createdAt,
-        lastLoginAt: c.lastLoginAt,
-      })),
+      customers: customers.map((c: any) => {
+        const custNoStr = c.custNo ? c.custNo.toString() : '';
+        const matchedOrder = custNoStr ? ordersByCust.get(custNoStr) : null;
+        let planName = c.legacyData?.plan ? `${c.legacyData.plan} 5G` : 'SIM-Only Starter';
+        let planPrice = 19;
+        let lineStatus = c.legacyData?.status || 'Active';
+
+        if (matchedOrder?.planName) {
+          planName = matchedOrder.planName;
+          planPrice = matchedOrder.pricePerMonth || 19;
+          lineStatus = matchedOrder.status || 'ACTIVE';
+        } else if (c.custNo === 'CUST882104') {
+          planName = '50GB Just right Plan';
+          planPrice = 25;
+          lineStatus = 'ACTIVE';
+        } else if (c.legacyData?.plan === 'Starter') {
+          planName = 'Starter Mobile 5G (5GB)';
+          planPrice = 19;
+        }
+
+        return {
+          id: c._id!.toString(),
+          custNo: c.custNo || '—',
+          name: c.name,
+          email: c.email,
+          phone: c.phone || '0488 912 340',
+          role: c.role,
+          planName,
+          planPrice,
+          lineStatus,
+          createdAt: c.createdAt,
+          lastLoginAt: c.lastLoginAt,
+        };
+      }),
     };
   }
 }
