@@ -86,13 +86,13 @@ export class CarrierService {
     private readonly mailService: MailService,
   ) {
     this.baseUrl = process.env.apiBaseUrl || 'https://api-octane.telcoinabox.com.au/tiabwsv2';
-    this.userName = process.env.octaneUserName || 'justmobile.api.2';
-    this.password = process.env.octanePassword || 'Neximet@2023';
+    this.userName = process.env.octaneUserName || '';
+    this.password = process.env.octanePassword || '';
     this.benzineBaseUrl = process.env.benzineBaseUrl || 'https://benzine.telcoinabox.com:443/tiab';
-    this.benzineUserName = process.env.benzineUserName || 'api.justmobile';
-    this.benzinePassword = process.env.benzinePassword || 'Q@w@e@r@t@y2023';
-    this.groupNo = process.env.groupNo || '922';
-    this.quickstreamApiKey = process.env.quickstreamApiKey || 'C01967_SEC_cjpde5i6crnxs794ek6nq7ybi3qs3nqdp2w37mzwecbaktfm6k2kjequ4rt4';
+    this.benzineUserName = process.env.benzineUserName || '';
+    this.benzinePassword = process.env.benzinePassword || '';
+    this.groupNo = process.env.groupNo || '';
+    this.quickstreamApiKey = process.env.quickstreamApiKey || '';
   }
 
   private getLogin(endpoint?: string) {
