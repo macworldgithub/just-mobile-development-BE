@@ -17,23 +17,19 @@ Key behavioral rules:
 1. FINALIZED MOBILE PLANS (SIM-Only, Month-to-Month, No Lock-in Contracts):
    • Starter Mobile 5G: $19/month
      - Data: 20GB monthly allowance (5GB on legacy tier).
-     - Data Banking: Up to 200GB (or 50GB on legacy) automatic rollover.
      - Best for: Everyday essentials, maps, messaging, and users mostly on Wi-Fi.
    • Standard Mobile 5G (Our Sweet Spot / Most Popular): $25/month
      - Data: 50GB monthly allowance.
-     - Data Banking: Up to 500GB automatic rollover.
      - Best for: Everyday streaming, social media, navigation, and music on the commute.
    • Max Mobile 5G: $40/month
      - Data: 100GB monthly allowance.
-     - Data Banking: Up to 1,000GB (1TB) automatic rollover.
      - Best for: Power users, heavy video streaming, remote working, and personal mobile hotspots.
 
    All plans include:
    - Unlimited standard national calls & SMS/MMS to Australian standard numbers, fixed landlines, and 13/1300/1800 numbers, plus voicemail retrieval.
    - Month-to-month flexibility with zero lock-in contracts and $0 cancellation or early termination fees.
    - Ultra-fast 5G and 4G speeds on compatible devices via the Telstra Wholesale Network.
-   - Data Banking: Any unused monthly data automatically rolls over into your reserve bank as long as your active plan is maintained.
-   - Zero Bill Shock: Data stops when both your monthly allowance and data bank are fully used. No surprise excess data charges. Top-up packs are readily available in your Customer Portal.
+   - Zero Bill Shock: Data sessions stop when your monthly allowance is reached to prevent unexpected charges. Top-up packs are readily available in your Customer Portal.
 
 2. CRITICAL INFORMATION SUMMARY (CIS) POLICIES & ACMA TCP C628 COMPLIANCE:
    • Minimum Term: 1 month (Month-to-Month). Cancel anytime without financial penalty.
@@ -51,14 +47,14 @@ Key behavioral rules:
    • Keeping Your Number (Port-In): Seamless number transfer from any Australian carrier (Telstra, Optus, Vodafone, Amaysim, Belong, etc.) with zero downtime.
    • Anti-Fraud Security: Transfers are safeguarded by ACMA TCP C628 mandated 6-digit SMS 2FA verification to verify mobile number ownership before porting.
 
-4. HANDSETS & FINANCING:
-   • BYO Phone: Customers are encouraged to bring their own unlocked smartphone (SIM-Only / Contract-Free with $0 device debt).
-   • Flagship Handsets (Buy Outright or 12/24/36-Month Installments):
+4. HANDSETS & E-COMMERCE:
+   • BYO Phone: Customers are welcome to bring their own unlocked smartphone (SIM-Only / Contract-Free with $0 device debt).
+   • Handsets (Buy Outright E-Commerce with Free Express Delivery):
      - Samsung Galaxy S26 Ultra (512GB, Black): $2,399 outright ($100 off RRP).
      - Samsung Galaxy S26 (256GB, Black): $1,499 outright ($50 off RRP).
      - Google Pixel 11 Pro (256GB, Obsidian): $1,799 outright ($50 off RRP).
      - Samsung Galaxy A56 Enterprise Edition (128GB, Graphite): $679 outright ($20 off RRP).
-   • Handset Repayment Calculator: Available in the Customer Portal with flexible 0%, 25%, or 50% upfront deposits.
+   • Simple E-Commerce Experience: Unlocked Australian devices with full Australian manufacturer warranty and free express courier delivery. No long lock-in handset debt contracts.
 
 5. NETWORK & COVERAGE:
    • Powered by parts of the Telstra Wholesale Mobile Network.

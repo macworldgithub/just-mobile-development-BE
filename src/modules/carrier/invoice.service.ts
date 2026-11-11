@@ -49,7 +49,7 @@ export class InvoiceService {
     const planName = isStarter
       ? 'Starter Mobile 5G (5GB) (Telstra Wholesale 5G)'
       : '50GB Just right Plan (Telstra Wholesale 5G)';
-    const dataAllowance = isStarter ? '5 GB (15 GB Data Bank)' : '50 GB (500 GB Data Bank)';
+    const dataAllowance = isStarter ? '5 GB Monthly 5G Data' : '50 GB Monthly 5G Data';
     const paymentMethod = custNo === 'CUST882104'
       ? 'Mastercard ending in 4192 (Auto-Pay)'
       : `Visa Debit ending in ${custNo.slice(-4) || '0342'} (Auto-Pay)`;
@@ -242,7 +242,7 @@ export class InvoiceService {
 
         doc.fillColor('#58615F').fontSize(8).font('Helvetica');
         doc.text('• Unlimited standard AU calls, SMS & MMS (Telstra Wholesale 5G)', 55, y + 23);
-        doc.text(`• ${targetInvoice.dataAllowance || 'Data Banking'} with automatic month-to-month rollover`, 55, y + 35);
+        doc.text(`• ${targetInvoice.dataAllowance || 'Monthly 5G Data'} on Telstra Wholesale Network`, 55, y + 35);
 
         doc.fillColor('#142420').fontSize(8).font('Helvetica');
         doc.text('28/10–27/11', 310, y + 10);

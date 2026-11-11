@@ -105,7 +105,6 @@ const PLANS = [
       'eSIM on compatible devices',
       'Proposed month-to-month service'
     ],
-    dataBankingMaxGb: 200,
     active: true,
     displayOrder: 1,
     createdAt: new Date(),
@@ -126,7 +125,6 @@ const PLANS = [
       'eSIM on compatible devices',
       'Proposed month-to-month service'
     ],
-    dataBankingMaxGb: 500,
     active: true,
     displayOrder: 2,
     createdAt: new Date(),
@@ -147,7 +145,6 @@ const PLANS = [
       'eSIM on compatible devices',
       'Flexible month-to-month service'
     ],
-    dataBankingMaxGb: 1000,
     active: true,
     displayOrder: 3,
     createdAt: new Date(),

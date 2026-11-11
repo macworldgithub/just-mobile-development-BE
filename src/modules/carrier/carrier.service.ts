@@ -1092,7 +1092,7 @@ export class CarrierService {
   }
 
   /**
-   * Get Real-time Data Bank Meter & Unbilled Usage
+   * Get Real-time Monthly Usage & Billing Cycle Meter
    */
   async getUnbilledUsage(custNo: string) {
     if (process.env.TELCO_LIVE_CREATE === 'true') {
@@ -1121,17 +1121,13 @@ export class CarrierService {
     });
 
     let planTotalGb = 50;
-    let bankedMaxGb = 500;
     let dataUsedGb = 7.6;
-    let bankedDataGb = 148.2;
     let periodEnd = '2026-11-27';
     let daysRemaining = 23;
 
     if (userDoc?.legacyData?.dataLimitGb) {
       planTotalGb = userDoc.legacyData.dataLimitGb;
       dataUsedGb = userDoc.legacyData.dataUsedGb ?? 0.8;
-      bankedMaxGb = Math.max(50, planTotalGb * 10);
-      bankedDataGb = 15.0;
       if (userDoc.legacyData.expiry) {
         periodEnd = userDoc.legacyData.expiry;
         const exp = new Date(periodEnd);
@@ -1140,19 +1136,13 @@ export class CarrierService {
     } else if (latestOrder?.planName) {
       if (latestOrder.planName.includes('20GB') || latestOrder.planName.includes('Just enough')) {
         planTotalGb = 20;
-        bankedMaxGb = 200;
         dataUsedGb = 3.8;
-        bankedDataGb = 85.0;
       } else if (latestOrder.planName.includes('100GB') || latestOrder.planName.includes('Just heaps') || latestOrder.planName.includes('Just more')) {
         planTotalGb = 100;
-        bankedMaxGb = 500;
         dataUsedGb = 12.4;
-        bankedDataGb = 210.5;
       } else {
         planTotalGb = 50;
-        bankedMaxGb = 500;
         dataUsedGb = 7.6;
-        bankedDataGb = 148.2;
       }
     }
 
@@ -1172,9 +1162,9 @@ export class CarrierService {
         dataUsedGb,
         dataRemainingGb,
         percentRemaining,
-        bankedDataGb,
-        bankedMaxGb,
-        autoRollover: true,
+        bankedDataGb: 0,
+        bankedMaxGb: 0,
+        autoRollover: false,
       },
       voiceAndSms: {
         unlimitedStandardAuCalls: true,
