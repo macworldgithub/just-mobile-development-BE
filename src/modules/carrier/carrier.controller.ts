@@ -48,6 +48,23 @@ export class CarrierController {
     return this.carrierService.getCustomerOrders(custNo);
   }
 
+  @Post('customers/:custNo/change-plan')
+  @HttpCode(HttpStatus.OK)
+  async changePlan(
+    @Param('custNo') custNo: string,
+    @Body()
+    body: {
+      planId?: string;
+      planName: string;
+      monthlyFee: number;
+      dataGb: number;
+      dataBankMaxGb?: number;
+      msn?: string;
+    },
+  ) {
+    return this.carrierService.changePlan(custNo, body);
+  }
+
   // ==========================================================================
   // TAX INVOICE ENDPOINTS (INT-08)
   // ==========================================================================
