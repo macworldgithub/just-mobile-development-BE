@@ -1,5 +1,6 @@
 import { Injectable, Logger, BadRequestException, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { MailService } from '../mail/mail.service';
 import * as soap from 'soap';
 import * as QRCode from 'qrcode';
 
@@ -78,7 +79,10 @@ export class CarrierService {
   private readonly groupNo: string;
   private readonly quickstreamApiKey: string;
 
-  constructor(private readonly db: DatabaseService) {
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly mailService: MailService,
+  ) {
     this.baseUrl = process.env.apiBaseUrl || 'https://api-octane.telcoinabox.com.au/tiabwsv2';
     this.userName = process.env.octaneUserName || 'justmobile.api.2';
     this.password = process.env.octanePassword || 'Neximet@2023';
@@ -478,6 +482,41 @@ export class CarrierService {
       { upsert: true },
     );
 
+    // Automated eSIM Welcome Email via Hostinger SMTP (INT-07)
+    try {
+      let recipientEmail = dto.email;
+      let recipientName: string | undefined;
+
+      if (!recipientEmail || !recipientEmail.includes('@')) {
+        const usersCol = this.db.getCollection('users');
+        const user = await usersCol.findOne({
+          $or: [{ custNo: dto.custNo }, { custNo: parseInt(dto.custNo.replace(/\D+/g, ''), 10) }],
+        });
+        if (user?.email) {
+          recipientEmail = user.email;
+          recipientName = user.name;
+        }
+      }
+
+      if (recipientEmail && recipientEmail.includes('@')) {
+        this.mailService.sendEsimWelcomeEmail({
+          to: recipientEmail,
+          recipientName,
+          custNo: dto.custNo,
+          orderId,
+          msn,
+          planName,
+          pricePerMonth,
+          lpaString,
+          smdpAddress: 'smdp.telcoinabox.com.au',
+          activationCode: `JM-AU-${orderId}`,
+          isEsim: true,
+        }).catch((err) => this.logger.warn(`Background eSIM email send error: ${err.message}`));
+      }
+    } catch (e: any) {
+      this.logger.warn(`Could not dispatch automated eSIM welcome email: ${e.message}`);
+    }
+
     return {
       success: true,
       orderId,
@@ -582,6 +621,41 @@ export class CarrierService {
       },
       { upsert: true },
     );
+
+    // Automated eSIM Welcome Email via Hostinger SMTP (INT-07)
+    try {
+      let recipientEmail = dto.email;
+      let recipientName: string | undefined;
+
+      if (!recipientEmail || !recipientEmail.includes('@')) {
+        const usersCol = this.db.getCollection('users');
+        const user = await usersCol.findOne({
+          $or: [{ custNo: dto.custNo }, { custNo: parseInt(dto.custNo.replace(/\D+/g, ''), 10) }],
+        });
+        if (user?.email) {
+          recipientEmail = user.email;
+          recipientName = user.name;
+        }
+      }
+
+      if (recipientEmail && recipientEmail.includes('@')) {
+        this.mailService.sendEsimWelcomeEmail({
+          to: recipientEmail,
+          recipientName,
+          custNo: dto.custNo,
+          orderId,
+          msn,
+          planName,
+          pricePerMonth,
+          lpaString,
+          smdpAddress: 'smdp.telcoinabox.com.au',
+          activationCode: `JM-AU-${orderId}`,
+          isEsim: true,
+        }).catch((err) => this.logger.warn(`Background eSIM email send error: ${err.message}`));
+      }
+    } catch (e: any) {
+      this.logger.warn(`Could not dispatch automated eSIM welcome email: ${e.message}`);
+    }
 
     return {
       success: true,
@@ -689,6 +763,67 @@ export class CarrierService {
         `If entering manually, input SM-DP+ Address: ${smdpAddress} and Activation Code: ${activationCode}`,
         'Follow device on-screen prompts to label your JustMobile line and start surfing.',
       ],
+    };
+  }
+
+  /**
+   * Resend / Send Order eSIM Welcome Email (INT-07)
+   */
+  async sendOrderEsimEmail(custNo: string, orderId: string, targetEmail?: string) {
+    const ordersCol = this.db.getCollection<OrderRecord>('orders');
+    const order = await ordersCol.findOne({
+      $or: [{ orderId }, { custNo }, { msn: orderId.replace(/\s+/g, '') }],
+    });
+
+    if (!order) {
+      throw new NotFoundException(`Order with reference ${orderId} not found.`);
+    }
+
+    let email = targetEmail || order.email;
+    let recipientName: string | undefined;
+
+    if (!email || !email.includes('@')) {
+      const usersCol = this.db.getCollection('users');
+      const user = await usersCol.findOne({
+        $or: [{ custNo: order.custNo }, { custNo: parseInt(order.custNo.replace(/\D+/g, ''), 10) }],
+      });
+      if (user?.email) {
+        email = user.email;
+        recipientName = user.name;
+      }
+    }
+
+    if (!email || !email.includes('@')) {
+      throw new BadRequestException('No valid email address found for this order.');
+    }
+
+    const smdpAddress = 'smdp.telcoinabox.com.au';
+    const activationCode = `JM-AU-${order.orderId.replace(/[^a-zA-Z0-9]/g, '')}`;
+    const lpaString = order.lpaString || `LPA:1$${smdpAddress}$${activationCode}`;
+
+    const sent = await this.mailService.sendEsimWelcomeEmail({
+      to: email,
+      recipientName,
+      custNo: order.custNo,
+      orderId: order.orderId,
+      msn: order.msn,
+      planName: order.planName,
+      pricePerMonth: order.pricePerMonth,
+      lpaString,
+      smdpAddress,
+      activationCode,
+      isEsim: order.isEsim ?? true,
+    });
+
+    return {
+      success: sent,
+      email,
+      orderId: order.orderId,
+      msn: order.msn,
+      isEsim: order.isEsim ?? true,
+      message: sent
+        ? `eSIM activation QR code and LPA string sent to ${email} via Hostinger SMTP.`
+        : 'Could not deliver email.',
     };
   }
 

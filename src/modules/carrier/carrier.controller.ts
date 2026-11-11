@@ -138,6 +138,16 @@ export class CarrierController {
     return this.carrierService.getEsimQRCode(identifier);
   }
 
+  @Post('customers/:custNo/orders/:orderId/send-esim-email')
+  @HttpCode(HttpStatus.OK)
+  async sendOrderEsimEmail(
+    @Param('custNo') custNo: string,
+    @Param('orderId') orderId: string,
+    @Body() body?: { email?: string },
+  ) {
+    return this.carrierService.sendOrderEsimEmail(custNo, orderId, body?.email);
+  }
+
   // ==========================================================================
   // ACMA PRE-PORT 2FA SMS ENDPOINTS
   // ==========================================================================
