@@ -164,19 +164,19 @@ const FAQS = [
   },
   {
     id: 'faq-2',
-    q: 'How can I pay for a new phone?',
-    question: 'How can I pay for a new phone?',
-    a: 'You can purchase your phone outright or spread the cost across flexible 12, 24, or 36-month instalment terms. You can also customize an optional upfront payment (0%, 25%, or 50%) to suit your monthly budget, or bundle your device with a JustMobile SIM-only plan.',
-    answer: 'You can purchase your phone outright or spread the cost across flexible 12, 24, or 36-month instalment terms. You can also customize an optional upfront payment (0%, 25%, or 50%) to suit your monthly budget, or bundle your device with a JustMobile SIM-only plan.',
+    q: 'How can I purchase a new phone?',
+    question: 'How can I purchase a new phone?',
+    a: 'All handsets in our store are purchased outright as a simple, transparent e-commerce transaction. There are no complicated lock-in financing contracts or confusing monthly debt repayments. Every phone is genuine Australian stock, factory unlocked, and delivered with free express courier shipping Australia-wide.',
+    answer: 'All handsets in our store are purchased outright as a simple, transparent e-commerce transaction. There are no complicated lock-in financing contracts or confusing monthly debt repayments. Every phone is genuine Australian stock, factory unlocked, and delivered with free express courier shipping Australia-wide.',
     displayOrder: 2,
     active: true
   },
   {
     id: 'faq-3',
-    q: 'Is a month-to-month plan the same as a phone repayment term?',
-    question: 'Is a month-to-month plan the same as a phone repayment term?',
-    a: 'No, your mobile service and handset repayments are kept clearly distinct. Our mobile plans are month-to-month with no lock-in contracts, giving you the freedom to switch plans whenever your needs change. If you choose a handset on instalments, your device payments simply continue on their set term.',
-    answer: 'No, your mobile service and handset repayments are kept clearly distinct. Our mobile plans are month-to-month with no lock-in contracts, giving you the freedom to switch plans whenever your needs change. If you choose a handset on instalments, your device payments simply continue on their set term.',
+    q: 'Do I have to bundle a phone with a mobile plan?',
+    question: 'Do I have to bundle a phone with a mobile plan?',
+    a: 'No! You have complete freedom. You can purchase a handset outright without any mobile plan, bring your own existing phone to our SIM-only month-to-month plans, or combine both anytime.',
+    answer: 'No! You have complete freedom. You can purchase a handset outright without any mobile plan, bring your own existing phone to our SIM-only month-to-month plans, or combine both anytime.',
     displayOrder: 3,
     active: true
   },
