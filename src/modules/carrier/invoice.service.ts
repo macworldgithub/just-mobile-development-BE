@@ -38,7 +38,7 @@ export class InvoiceService {
 
     const ordersCol = this.db.getCollection('orders');
     const userOrders = await ordersCol.find({ custNo }).toArray();
-    const isTestAlexander = custNo === 'CUST882104';
+    const isTestCustomer = custNo === 'CUST990001';
 
     // Lookup customer and plan to generate accurate amounts
     const usersCol = this.db.getCollection('users');
@@ -46,7 +46,7 @@ export class InvoiceService {
       $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
     });
 
-    const hasAnyPlan = Boolean(userDoc?.legacyData?.plan || userOrders.length > 0 || isTestAlexander);
+    const hasAnyPlan = Boolean(userDoc?.legacyData?.plan || userOrders.length > 0 || isTestCustomer);
     if (!hasAnyPlan) {
       return [];
     }
@@ -126,12 +126,12 @@ export class InvoiceService {
     const usersCol = this.db.getCollection('users');
     const user = await usersCol.findOne({ custNo });
 
-    const customerName = user?.name || 'Alexander Wright';
+    const customerName = user?.name || 'Jordan Miller';
     const customerAddress = user?.address
       ? `${user.address}, ${user.suburb || 'Sydney'} ${user.state || 'NSW'} ${user.postcode || '2000'}`
       : 'Unit 4, 182 George Street, Sydney NSW 2000';
-    const customerEmail = user?.email || 'alexander.wright@justmobile.com.au';
-    const customerPhone = user?.phone || '0488 912 340';
+    const customerEmail = user?.email || 'jordan.miller@example.com';
+    const customerPhone = user?.phone || '0491 570 006';
 
     return new Promise<Buffer>((resolve, reject) => {
       try {

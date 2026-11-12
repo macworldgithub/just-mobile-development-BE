@@ -243,9 +243,9 @@ export class CarrierService {
       const user = await usersCol.findOne({ custNo });
       return {
         custNo,
-        name: user?.name || 'Alexander Wright',
-        email: user?.email || 'alexander.wright@justmobile.com.au',
-        phone: user?.phone || '0488 912 340',
+        name: user?.name || 'Jordan Miller',
+        email: user?.email || 'jordan.miller@example.com',
+        phone: user?.phone || '0491 570 006',
         status: 'Active',
         notes: 'Simulated customer record for development',
       };
@@ -281,12 +281,12 @@ export class CarrierService {
         };
       }
 
-      if (userDoc?.legacyData?.plan || custNo === 'CUST882104') {
+      if (userDoc?.legacyData?.plan || custNo === 'CUST990001') {
         return {
           services: [
             {
-              serviceId: 'SVC-JM-882104',
-              serviceNumber: userDoc?.phone || '0488 912 340',
+              serviceId: 'SVC-JM-990001',
+              serviceNumber: userDoc?.phone || '0491 570 006',
               serviceType: 'Mobile eSIM 5G',
               planName: userDoc?.legacyData?.plan
                 ? `${userDoc.legacyData.plan} Mobile 5G (${userDoc.legacyData.dataLimitGb || 5}GB)`
@@ -1296,8 +1296,8 @@ export class CarrierService {
       $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
     });
 
-    const isTestAlexander = custNo === 'CUST882104';
-    const hasAnyPlan = Boolean(userDoc?.legacyData?.plan || userDoc?.legacyData?.dataLimitGb || latestOrder?.planName || isTestAlexander);
+    const isTestCustomer = custNo === 'CUST990001';
+    const hasAnyPlan = Boolean(userDoc?.legacyData?.plan || userDoc?.legacyData?.dataLimitGb || latestOrder?.planName || isTestCustomer);
 
     if (!hasAnyPlan) {
       return {
@@ -1382,8 +1382,8 @@ export class CarrierService {
       $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
     });
 
-    const isTestAlexander = custNo === 'CUST882104';
-    const hasAnyPlan = Boolean(userDoc?.legacyData?.plan || latestOrder?.planName || isTestAlexander);
+    const isTestCustomer = custNo === 'CUST990001';
+    const hasAnyPlan = Boolean(userDoc?.legacyData?.plan || latestOrder?.planName || isTestCustomer);
 
     if (!hasAnyPlan) {
       return {

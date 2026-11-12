@@ -89,14 +89,6 @@ export class AuthService implements OnModuleInit {
         });
         this.logger.log(`✓ Seeded default admin user (${adminEmail})`);
       }
-
-      // Ensure test customer Alexander Wright (CUST882104) has PIN '1234' for PIN login testing
-      const alexander = await usersCol.findOne({ custNo: 'CUST882104' });
-      if (alexander && !alexander.pin) {
-        const hashedPin = await bcrypt.hash('1234', 10);
-        await usersCol.updateOne({ _id: alexander._id }, { $set: { pin: hashedPin } });
-        this.logger.log('✓ Configured legacy PIN 1234 for test customer CUST882104');
-      }
     } catch (err: any) {
       this.logger.warn(`Could not seed default admin: ${err.message}`);
     }
