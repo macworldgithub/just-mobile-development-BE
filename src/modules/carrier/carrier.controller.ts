@@ -129,6 +129,24 @@ export class CarrierController {
     return this.portingWorker.forceSyncOrder(orderId);
   }
 
+  @Post('orders/:orderId/resubmit-port')
+  @HttpCode(HttpStatus.OK)
+  async resubmitPortOrder(
+    @Param('orderId') orderId: string,
+    @Body() body: { numType?: 'prepaid' | 'postpaid'; dob?: string; arn?: string; donorCarrier?: string },
+  ) {
+    return this.carrierService.resubmitPortOrder(orderId, body);
+  }
+
+  @Post('orders/:orderId/simulate-rejection')
+  @HttpCode(HttpStatus.OK)
+  async simulateRejection(
+    @Param('orderId') orderId: string,
+    @Body() body?: { reason?: string; donor?: string },
+  ) {
+    return this.carrierService.simulatePortRejection(orderId, body?.reason, body?.donor);
+  }
+
   // ==========================================================================
   // ESIM DIGITAL QR CODE ENDPOINTS
   // ==========================================================================

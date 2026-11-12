@@ -56,16 +56,20 @@ export class CarrierPortingWorker {
             if (['COMPLETED', 'ACTIVE', 'PROVISIONED', 'SUCCESS'].includes(liveStatus)) {
               await this.transitionToActive(order);
             } else if (['REJECTED', 'FAILED', 'CANCELLED'].includes(liveStatus)) {
+              const errorMessage = ret?.errorMessage || ret?.message || 'Identity details do not match donor carrier records.';
+              const errorCode = ret?.errorCode || 'DONOR_REJECTED';
               await ordersCol.updateOne(
                 { orderId: order.orderId },
                 {
                   $set: {
-                    status: 'FAILED',
+                    status: 'REJECTED',
+                    rejectionReason: errorMessage,
+                    rejectionCode: errorCode,
                     updatedAt: new Date(),
                   },
                 },
               );
-              this.logger.warn(`[PORTING WORKER] Order ${order.orderId} rejected by donor carrier: ${ret?.errorMessage || 'Carrier rejection'}`);
+              this.logger.warn(`[PORTING WORKER] Order ${order.orderId} rejected by donor carrier: ${errorMessage}`);
             }
           } else {
             // Development / Simulation Mode:

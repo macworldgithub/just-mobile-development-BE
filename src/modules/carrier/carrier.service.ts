@@ -51,7 +51,7 @@ export interface OrderRecord {
   planNo: string;
   planName: string;
   pricePerMonth: number;
-  status: 'PENDING' | 'ACTIVE' | 'PORT_IN_PROGRESS' | 'COMPLETED' | 'FAILED';
+  status: 'PENDING' | 'ACTIVE' | 'PORT_IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'REJECTED';
   orderType: 'NEW_ACTIVATION' | 'PORT_IN' | 'PLAN_CHANGE';
   orderAction: 'ADD_WME_NEW' | 'ADD_WME_PORT' | 'CHANGE_WME_PLAN';
   isEsim: boolean;
@@ -60,6 +60,10 @@ export interface OrderRecord {
   numType?: 'prepaid' | 'postpaid';
   dob?: string;
   arn?: string;
+  donorCarrier?: string;
+  rejectionReason?: string | null;
+  rejectionCode?: string | null;
+  portRetries?: number;
   address?: string;
   suburb?: string;
   state?: string;
@@ -696,6 +700,146 @@ export class CarrierService {
   }
 
   /**
+   * Resubmit a rejected or failed port-in order with updated donor credentials (INT-10 UX)
+   */
+  async resubmitPortOrder(
+    orderId: string,
+    dto: {
+      numType?: 'prepaid' | 'postpaid';
+      dob?: string;
+      arn?: string;
+      donorCarrier?: string;
+    },
+  ): Promise<{ success: boolean; message: string; order: any }> {
+    const ordersCol = this.db.getCollection<OrderRecord>('orders');
+    const order = await ordersCol.findOne({ orderId });
+
+    if (!order) {
+      throw new NotFoundException(`Order #${orderId} not found.`);
+    }
+
+    if (order.status === 'ACTIVE' || order.status === 'COMPLETED') {
+      throw new BadRequestException(`Order #${orderId} has already completed and is active on the network.`);
+    }
+
+    const effectiveNumType = dto.numType || order.numType || 'prepaid';
+    const effectiveDob = dto.dob !== undefined ? dto.dob : order.dob;
+    const effectiveArn = dto.arn !== undefined ? dto.arn : order.arn;
+    const effectiveDonor = dto.donorCarrier || order.donorCarrier || 'Optus';
+
+    if (effectiveNumType === 'prepaid' && (!effectiveDob || effectiveDob.trim().length < 4)) {
+      throw new BadRequestException('Valid Date of Birth is required to transfer a prepaid service.');
+    }
+    if (effectiveNumType === 'postpaid' && (!effectiveArn || effectiveArn.trim().length < 3)) {
+      throw new BadRequestException('Valid Account Number is required to transfer a postpaid contract service.');
+    }
+
+    const isLive = process.env.TELCO_LIVE_CREATE === 'true';
+    if (isLive) {
+      this.logger.warn(`[LIVE CARRIER CALL] Resubmitting ADD_WME_PORT to Octane for order ${orderId} with updated credentials.`);
+      try {
+        const msn = order.msn.replace(/\s+/g, '');
+        await this.soapCall('/UtbOrder', 'orderCreate', {
+          createRequest: {
+            custNo: order.custNo,
+            orderType: 'SRVC_ORD',
+            orderAction: 'ADD_WME_PORT',
+            orderItems: {
+              wmePortInReqItem: {
+                lineType: 'R',
+                planNo: order.planNo,
+                agentId: '923',
+                msn,
+                isEsim: true,
+                isQRcode: true,
+                cycleNo: '28',
+                spendCode: '80610',
+                notificationEmail: order.email || 'customer@justmobile.com.au',
+                ...(effectiveNumType === 'prepaid' ? { dob: effectiveDob } : { arn: effectiveArn }),
+              },
+            },
+          },
+        });
+      } catch (err: any) {
+        this.logger.error(`Live port order resubmission failed: ${err.message}`);
+        throw new BadRequestException(`Carrier rejected resubmission: ${err.message}`);
+      }
+    }
+
+    const now = new Date();
+    await ordersCol.updateOne(
+      { orderId },
+      {
+        $set: {
+          status: 'PORT_IN_PROGRESS',
+          numType: effectiveNumType,
+          dob: effectiveDob,
+          arn: effectiveArn,
+          donorCarrier: effectiveDonor,
+          rejectionReason: null,
+          rejectionCode: null,
+          portRetries: (order.portRetries || 0) + 1,
+          updatedAt: now,
+        },
+      },
+    );
+
+    const updated = await ordersCol.findOne({ orderId });
+    this.logger.log(`✓ Port order #${orderId} resubmitted to ${effectiveDonor}. Status changed to PORT_IN_PROGRESS.`);
+
+    return {
+      success: true,
+      message: `Updated transfer details submitted to ${effectiveDonor}. Number porting is now in progress.`,
+      order: updated,
+    };
+  }
+
+  /**
+   * Simulate a donor network rejection for testing port-in edge case flows
+   */
+  async simulatePortRejection(
+    orderId: string,
+    reason?: string,
+    donor?: string,
+  ): Promise<{ success: boolean; message: string; order: any }> {
+    const ordersCol = this.db.getCollection<OrderRecord>('orders');
+    const order = await ordersCol.findOne({ orderId });
+
+    if (!order) {
+      throw new NotFoundException(`Order #${orderId} not found.`);
+    }
+
+    const donorName = donor || order.donorCarrier || 'Optus';
+    const isPostpaid = order.numType === 'postpaid';
+    const defaultReason = isPostpaid
+      ? `Account Number does not match records at ${donorName}. Please verify the account number on your latest bill.`
+      : `Date of Birth does not match records at ${donorName}. Please verify the birthdate on your account.`;
+
+    const rejectionReason = reason || defaultReason;
+    const rejectionCode = isPostpaid ? 'REJECT_INVALID_ACCOUNT_NO' : 'REJECT_DOB_MISMATCH';
+
+    await ordersCol.updateOne(
+      { orderId },
+      {
+        $set: {
+          status: 'REJECTED',
+          rejectionReason,
+          rejectionCode,
+          donorCarrier: donorName,
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    const updated = await ordersCol.findOne({ orderId });
+    return {
+      success: true,
+      message: `Donor carrier rejection simulated for order #${orderId}`,
+      order: updated,
+    };
+  }
+
+  /**
    * Query Order Status
    */
   async queryOrder(orderId: string) {
@@ -714,6 +858,13 @@ export class CarrierService {
       planName: order.planName,
       orderType: order.orderType,
       isEsim: order.isEsim,
+      numType: order.numType,
+      dob: order.dob,
+      arn: order.arn,
+      donorCarrier: order.donorCarrier,
+      rejectionReason: order.rejectionReason,
+      rejectionCode: order.rejectionCode,
+      portRetries: order.portRetries,
       createdAt: order.createdAt,
     };
   }
@@ -739,6 +890,13 @@ export class CarrierService {
       createdAt: o.createdAt,
       completedAt: (o as any).completedAt,
       donorNetworkNote: (o as any).donorNetworkNote,
+      rejectionReason: o.rejectionReason,
+      rejectionCode: o.rejectionCode,
+      donorCarrier: o.donorCarrier,
+      numType: o.numType,
+      dob: o.dob,
+      arn: o.arn,
+      portRetries: o.portRetries,
     }));
   }
 
