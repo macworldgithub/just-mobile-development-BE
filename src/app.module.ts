@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { DatabaseModule } from './database/database.module';
 import { HandsetsModule } from './modules/handsets/handsets.module';
@@ -10,13 +9,12 @@ import { MailModule } from './modules/mail/mail.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { CarrierModule } from './modules/carrier/carrier.module';
 import { NewsletterModule } from './modules/newsletter/newsletter.module';
+import * as dotenv from 'dotenv';
+
+dotenv.config();
 
 @Module({
   imports: [
-    ConfigModule.forRoot({
-      isGlobal: true,
-      envFilePath: '.env',
-    }),
     ScheduleModule.forRoot(),
     DatabaseModule,
     CarrierModule,
