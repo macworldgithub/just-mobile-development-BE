@@ -575,4 +575,83 @@ export class MailService {
       return false;
     }
   }
+
+  async sendBroadcastEmail(
+    to: string,
+    subject: string,
+    messageBody: string,
+  ): Promise<boolean> {
+    if (!this.transporter) {
+      this.initTransporter();
+    }
+
+    const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@justmobile.com.au';
+    const sender = `"JustMobile Updates" <${fromEmail}>`;
+
+    const formattedBody = messageBody
+      .split('\n')
+      .filter((p) => p.trim().length > 0)
+      .map((p) => `<p style="font-size: 15px; line-height: 1.6; color: #374151; margin-bottom: 16px;">${p}</p>`)
+      .join('');
+
+    const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>${subject}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #FAFBF8; margin: 0; padding: 24px; color: #142420; }
+    .container { max-width: 580px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #dfe5d7; box-shadow: 0 4px 20px rgba(20,36,32,0.06); }
+    .header { background-color: #142420; padding: 26px 32px; }
+    .logo-text { color: #ffffff; font-size: 24px; font-weight: 800; letter-spacing: -0.5px; }
+    .logo-accent { color: #D5F879; }
+    .content { padding: 36px 32px; }
+    .title { font-size: 22px; font-weight: 800; color: #142420; margin-top: 0; margin-bottom: 20px; line-height: 1.3; }
+    .cta-btn { display: inline-block; background-color: #142420; color: #ffffff !important; padding: 14px 28px; border-radius: 8px; font-weight: 700; font-size: 14.5px; text-decoration: none; }
+    .footer { padding: 24px 32px; background: #F1F3ED; border-top: 1px solid #dfe5d7; font-size: 11.5px; color: #6b7280; line-height: 1.5; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="logo-text">justmobile<span class="logo-accent">.</span></div>
+    </div>
+    <div class="content">
+      <h1 class="title">${subject}</h1>
+      <div>
+        ${formattedBody}
+      </div>
+      <div style="text-align: center; margin: 32px 0 16px;">
+        <a href="https://justmobile.com.au" class="cta-btn">Visit JustMobile &rarr;</a>
+      </div>
+    </div>
+    <div class="footer">
+      &copy; ${new Date().getFullYear()} JustMobile Australia · Less telco. More you.<br/>
+      Connected to Telstra 5G Wholesale Network · ABN 48 672 819 204.<br/>
+      You received this update because you subscribed at justmobile.com.au.
+    </div>
+  </div>
+</body>
+</html>
+    `;
+
+    try {
+      if (this.transporter) {
+        const info = await this.transporter.sendMail({
+          from: sender,
+          to,
+          subject,
+          text: messageBody,
+          html,
+        });
+        this.logger.log(`✓ Broadcast email sent to ${to}: ${info.messageId}`);
+        return true;
+      }
+      return false;
+    } catch (err: any) {
+      this.logger.error(`Failed to send broadcast email to ${to}: ${err.message}`);
+      return false;
+    }
+  }
 }

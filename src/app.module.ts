@@ -9,6 +9,7 @@ import { ChatModule } from './modules/chat/chat.module';
 import { MailModule } from './modules/mail/mail.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { CarrierModule } from './modules/carrier/carrier.module';
+import { NewsletterModule } from './modules/newsletter/newsletter.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { CarrierModule } from './modules/carrier/carrier.module';
     ScheduleModule.forRoot(),
     DatabaseModule,
     CarrierModule,
+    NewsletterModule,
     MailModule,
     AuthModule,
     HandsetsModule,
