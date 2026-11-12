@@ -617,19 +617,26 @@ export class AuthService implements OnModuleInit {
         const matchedOrder = custNoStr ? ordersByCust.get(custNoStr) : null;
         let planName = c.legacyData?.plan ? `${c.legacyData.plan} 5G` : 'JM 65GB Auto';
         let planPrice = 37.55;
-        let lineStatus = c.legacyData?.status || 'Active';
 
         if (matchedOrder?.planName) {
           planName = matchedOrder.planName;
           planPrice = matchedOrder.pricePerMonth || 37.55;
-          lineStatus = matchedOrder.status || 'ACTIVE';
-        } else if (c.custNo === 'CUST882104') {
-          planName = 'JM 65GB Auto';
-          planPrice = 37.55;
-          lineStatus = 'ACTIVE';
         } else if (c.legacyData?.plan === 'Starter') {
           planName = 'JM 10GB Auto';
           planPrice = 20.54;
+        }
+
+        // Standardize status casing (e.g. Octane carrier uppercase 'ACTIVE' -> 'Active')
+        const rawStatus = (matchedOrder?.status || c.legacyData?.status || 'Active').trim().toUpperCase();
+        let lineStatus = 'Active';
+        if (rawStatus === 'DISCONNECTED') {
+          lineStatus = 'Disconnected';
+        } else if (rawStatus === 'SUSPENDED') {
+          lineStatus = 'Suspended';
+        } else if (rawStatus.includes('PROGRESS') || rawStatus === 'PENDING') {
+          lineStatus = 'Pending';
+        } else {
+          lineStatus = 'Active';
         }
 
         return {
