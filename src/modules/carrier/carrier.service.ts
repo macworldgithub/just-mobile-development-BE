@@ -277,19 +277,25 @@ export class CarrierService {
         };
       }
 
+      if (userDoc?.legacyData?.plan || custNo === 'CUST882104') {
+        return {
+          services: [
+            {
+              serviceId: 'SVC-JM-882104',
+              serviceNumber: userDoc?.phone || '0488 912 340',
+              serviceType: 'Mobile eSIM 5G',
+              planName: userDoc?.legacyData?.plan
+                ? `${userDoc.legacyData.plan} Mobile 5G (${userDoc.legacyData.dataLimitGb || 5}GB)`
+                : 'JM 65GB Auto',
+              status: 'Active',
+              lineSeqNo: '1',
+            },
+          ],
+        };
+      }
+
       return {
-        services: [
-          {
-            serviceId: 'SVC-JM-882104',
-            serviceNumber: userDoc?.phone || '0488 912 340',
-            serviceType: 'Mobile eSIM 5G',
-            planName: userDoc?.legacyData?.plan
-              ? `${userDoc.legacyData.plan} Mobile 5G (${userDoc.legacyData.dataLimitGb || 5}GB)`
-              : '50GB Just right Plan',
-            status: 'Active',
-            lineSeqNo: '1',
-          },
-        ],
+        services: [],
       };
     }
 
@@ -1132,7 +1138,21 @@ export class CarrierService {
       $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
     });
 
-    let planTotalGb = 50;
+    const isTestAlexander = custNo === 'CUST882104';
+    const hasAnyPlan = Boolean(userDoc?.legacyData?.plan || userDoc?.legacyData?.dataLimitGb || latestOrder?.planName || isTestAlexander);
+
+    if (!hasAnyPlan) {
+      return {
+        custNo,
+        hasActivePlan: false,
+        billingCycle: 'No active plan',
+        cycleDetails: null,
+        dataMeter: null,
+        voiceAndSms: null,
+      };
+    }
+
+    let planTotalGb = 65;
     let dataUsedGb = 7.6;
     let periodEnd = '2026-11-27';
     let daysRemaining = 23;
@@ -1146,16 +1166,9 @@ export class CarrierService {
         daysRemaining = Math.max(1, Math.ceil((exp.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
       }
     } else if (latestOrder?.planName) {
-      if (latestOrder.planName.includes('20GB') || latestOrder.planName.includes('Just enough')) {
-        planTotalGb = 20;
-        dataUsedGb = 3.8;
-      } else if (latestOrder.planName.includes('100GB') || latestOrder.planName.includes('Just heaps') || latestOrder.planName.includes('Just more')) {
-        planTotalGb = 100;
-        dataUsedGb = 12.4;
-      } else {
-        planTotalGb = 50;
-        dataUsedGb = 7.6;
-      }
+      const match = latestOrder.planName.match(/(\d+)GB/i);
+      planTotalGb = match ? parseInt(match[1], 10) : (latestOrder.pricePerMonth === 20.54 ? 10 : 65);
+      dataUsedGb = Number((planTotalGb * 0.15).toFixed(1));
     }
 
     const dataRemainingGb = Number(Math.max(0, planTotalGb - dataUsedGb).toFixed(1));
@@ -1163,6 +1176,7 @@ export class CarrierService {
 
     return {
       custNo,
+      hasActivePlan: true,
       billingCycle: '28th of every month',
       cycleDetails: {
         periodStart: '2026-10-28',
@@ -1209,6 +1223,24 @@ export class CarrierService {
     const userDoc: any = await usersCol.findOne({
       $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
     });
+
+    const isTestAlexander = custNo === 'CUST882104';
+    const hasAnyPlan = Boolean(userDoc?.legacyData?.plan || latestOrder?.planName || isTestAlexander);
+
+    if (!hasAnyPlan) {
+      return {
+        custNo,
+        hasActivePlan: false,
+        currentBalance: 0.0,
+        formattedBalance: '$0.00',
+        lastInvoiceAmount: 0.0,
+        lastInvoiceDate: null,
+        nextInvoiceDate: null,
+        nextInvoiceAmount: 0.0,
+        autoPayStatus: 'Inactive',
+        paymentMethod: 'No payment method registered',
+      };
+    }
 
     const isStarter = userDoc?.legacyData?.plan === 'Starter';
     const nextAmount = isStarter ? 20.54 : (latestOrder?.pricePerMonth || 37.55);

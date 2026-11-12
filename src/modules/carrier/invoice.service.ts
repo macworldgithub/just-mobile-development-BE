@@ -36,11 +36,20 @@ export class InvoiceService {
       return existing;
     }
 
+    const ordersCol = this.db.getCollection('orders');
+    const userOrders = await ordersCol.find({ custNo }).toArray();
+    const isTestAlexander = custNo === 'CUST882104';
+
     // Lookup customer and plan to generate accurate amounts
     const usersCol = this.db.getCollection('users');
     const userDoc: any = await usersCol.findOne({
       $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
     });
+
+    const hasAnyPlan = Boolean(userDoc?.legacyData?.plan || userOrders.length > 0 || isTestAlexander);
+    if (!hasAnyPlan) {
+      return [];
+    }
 
     const isStarter = userDoc?.legacyData?.plan === 'Starter';
     const amount = isStarter ? 20.54 : 37.55;
