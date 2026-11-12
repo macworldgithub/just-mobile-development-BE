@@ -52,7 +52,7 @@ This guide explains how to deploy both the **Backend** (`just-mobile-development
 | `MONGO_URI` | MongoDB Atlas connection string | `mongodb+srv://<user>:<pass>@...mongodb.net/?...` |
 | `JWT_SECRET` | Secret key for JWT signing | `your_secure_jwt_secret_key_here` |
 | `OPENAI_KEY` | OpenAI API key for Bele Assistant | `sk-proj-...` |
-| `TELCO_LIVE_CREATE` | Live SIM provisioning guard switch | `false` (keep `false` until live) |
+| `TELCO_LIVE_CREATE` | Live SIM provisioning guard switch | `true` (Live carrier registration mode) |
 | `apiBaseUrl` | Octane API Base URL | `https://octane.telcoinabox.com/api/v1` |
 | `octaneUserName` | Octane Carrier Username | *[Your credentials]* |
 | `octanePassword` | Octane Carrier Password | *[Your credentials]* |
@@ -123,3 +123,4 @@ This guide explains how to deploy both the **Backend** (`just-mobile-development
 4. **Newsletter Capture:**
    Enter an email in the homepage launch banner.
    Expected: Success confirmation, lead stored in MongoDB Atlas, and visible immediately in `/admin`.
+
