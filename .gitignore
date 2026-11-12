@@ -35,6 +35,7 @@ Thumbs.db
 .env
 .env.*
 *.env
+!.env.example
 
 # Service Account Keys & Secrets
 cedar-binder-*.json

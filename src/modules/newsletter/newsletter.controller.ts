@@ -49,3 +49,4 @@ export class NewsletterController {
     return this.newsletterService.getBroadcastHistory();
   }
 }
+
