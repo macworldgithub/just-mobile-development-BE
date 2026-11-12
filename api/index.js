@@ -1,11 +1,11 @@
 const { NestFactory } = require('@nestjs/core');
 const { ExpressAdapter } = require('@nestjs/platform-express');
 const express = require('express');
-const { AppModule } = require('../dist/app.module');
 
 let server;
 
 async function createServer() {
+  const { AppModule } = require('../dist/app.module');
   const expressApp = express();
   const adapter = new ExpressAdapter(expressApp);
   const app = await NestFactory.create(AppModule, adapter);
@@ -43,15 +43,29 @@ async function createServer() {
 }
 
 module.exports = async (req, res) => {
-  // If the request was rewritten by Vercel, restore the original URL so NestJS controllers match
-  const originalUrl = req.headers['x-matched-path'] || req.headers['x-forwarded-uri'];
-  if (originalUrl && req.url !== originalUrl) {
-    req.url = originalUrl;
-  }
+  try {
+    // If the request was rewritten by Vercel, restore the original URL so NestJS controllers match
+    const originalUrl = req.headers['x-matched-path'] || req.headers['x-forwarded-uri'];
+    if (originalUrl && req.url !== originalUrl) {
+      req.url = originalUrl;
+    }
 
-  if (!server) {
-    server = await createServer();
+    if (!server) {
+      server = await createServer();
+    }
+    return server(req, res);
+  } catch (err) {
+    console.error('NestJS Serverless Initialization Error:', err);
+    res.statusCode = 500;
+    res.setHeader('Content-Type', 'application/json');
+    return res.end(
+      JSON.stringify({
+        success: false,
+        error: 'Backend Serverless Initialization Error',
+        message: err.message,
+        tip: 'Ensure all environment variables (especially MONGO_URI) are configured in Vercel Project Settings and redeploy.',
+      }),
+    );
   }
-  return server(req, res);
 };
 
