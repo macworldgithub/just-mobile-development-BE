@@ -134,6 +134,7 @@ export class AuthService implements OnModuleInit {
     });
 
     // Send code via Hostinger SMTP
+    this.logger.log(`[TEST / AUDIT] Verification code for ${email}: ${code}`);
     await this.mailService.sendVerificationCode(email, code, existingUser?.name);
 
     return {
