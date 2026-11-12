@@ -413,9 +413,9 @@ export class CarrierService {
     emailRecipient?: string;
   }> {
     const msn = dto.msn.replace(/\s+/g, '');
-    const planNo = dto.planNo || '13369';
-    const planName = dto.planName || '50GB Just right Plan';
-    const pricePerMonth = dto.pricePerMonth || 25;
+    const planNo = dto.planNo || '11144157';
+    const planName = dto.planName || 'JM 65GB Auto';
+    const pricePerMonth = dto.pricePerMonth || 37.55;
     const isLive = process.env.TELCO_LIVE_CREATE === 'true';
 
     let orderId = `ORD-${Math.floor(100000 + Math.random() * 900000)}`;
@@ -557,9 +557,9 @@ export class CarrierService {
     emailRecipient?: string;
   }> {
     const msn = dto.msn.replace(/\s+/g, '');
-    const planNo = dto.planNo || '13369';
-    const planName = dto.planName || '50GB Just right Plan';
-    const pricePerMonth = dto.pricePerMonth || 25;
+    const planNo = dto.planNo || '11144157';
+    const planName = dto.planName || 'JM 65GB Auto';
+    const pricePerMonth = dto.pricePerMonth || 37.55;
     const isLive = process.env.TELCO_LIVE_CREATE === 'true';
 
     let orderId = `PORT-${Math.floor(100000 + Math.random() * 900000)}`;
@@ -1013,6 +1013,18 @@ export class CarrierService {
     const cleanMsn = (dto.msn || '0488912340').replace(/\s+/g, '');
     const isLive = process.env.TELCO_LIVE_CREATE === 'true';
 
+    const PLAN_ID_TO_NO: Record<string, string> = {
+      'plan-10gb': '11144153',
+      'plan-15gb': '11144154',
+      'plan-29gb': '11144155',
+      'plan-65gb': '11144157',
+      'plan-100gb': '11144168',
+      'plan-120gb': '11144169',
+      'plan-150gb': '11144170',
+      'plan-180gb': '11144171',
+    };
+    const targetPlanNo = (dto.planId && PLAN_ID_TO_NO[dto.planId]) || '11144157';
+
     if (isLive) {
       this.logger.warn(`[LIVE CARRIER CALL] Submitting plan change to Octane for ${cleanCustNo}`);
       try {
@@ -1024,7 +1036,7 @@ export class CarrierService {
             orderItems: {
               wmeChgPlanReqItem: {
                 msn: cleanMsn,
-                planNo: dto.planId === 'plan-20gb' ? '13368' : dto.planId === 'plan-100gb' ? '13370' : '13369',
+                planNo: targetPlanNo,
               },
             },
           },
@@ -1199,8 +1211,8 @@ export class CarrierService {
     });
 
     const isStarter = userDoc?.legacyData?.plan === 'Starter';
-    const nextAmount = isStarter ? 19.0 : (latestOrder?.pricePerMonth || 25.0);
-    const lastAmount = isStarter ? 19.0 : 25.0;
+    const nextAmount = isStarter ? 20.54 : (latestOrder?.pricePerMonth || 37.55);
+    const lastAmount = isStarter ? 20.54 : (latestOrder?.pricePerMonth || 37.55);
 
     const paymentMethod = custNo === 'CUST882104'
       ? 'Mastercard ending in 4192'

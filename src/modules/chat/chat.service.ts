@@ -41,7 +41,7 @@ export class ChatService {
         this.logger.error(`OpenAI error status ${res.status}:`, errBody);
         return {
           reply:
-            "I'm having a brief connection hiccup. JustMobile offers plans from $19/mth (Starter), $25/mth (Standard), and $40/mth (Max) on the Telstra Wholesale Network!",
+            "I'm having a brief connection hiccup. JustMobile offers plans from $20.54/mth (10GB) up to $67.00/mth (180GB) on the Telstra Wholesale Network!",
         };
       }
 

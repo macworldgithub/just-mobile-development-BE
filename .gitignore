@@ -44,7 +44,6 @@ cedar-binder-*.json
 # Seed & temporary scripts
 seed*.js
 test-*.js
-scripts/migrate*.js
-scripts/cleanup*.js
-scripts/update*.js
+scripts/*.js
+scripts/
 *.users.json

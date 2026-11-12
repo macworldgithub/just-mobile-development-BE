@@ -43,13 +43,13 @@ export class InvoiceService {
     });
 
     const isStarter = userDoc?.legacyData?.plan === 'Starter';
-    const amount = isStarter ? 19.0 : 25.0;
+    const amount = isStarter ? 20.54 : 37.55;
     const gstAmount = Number((amount / 11).toFixed(2));
     const subtotal = Number((amount - gstAmount).toFixed(2));
     const planName = isStarter
-      ? 'Starter Mobile 5G (5GB) (Telstra Wholesale 5G)'
-      : '50GB Just right Plan (Telstra Wholesale 5G)';
-    const dataAllowance = isStarter ? '5 GB Monthly 5G Data' : '50 GB Monthly 5G Data';
+      ? 'JM 10GB Auto (Telstra Wholesale 4G)'
+      : 'JM 65GB Auto (Telstra Wholesale 5G)';
+    const dataAllowance = isStarter ? '10 GB Monthly 4G Data' : '65 GB Monthly 5G Data';
     const paymentMethod = custNo === 'CUST882104'
       ? 'Mastercard ending in 4192 (Auto-Pay)'
       : `Visa Debit ending in ${custNo.slice(-4) || '0342'} (Auto-Pay)`;
