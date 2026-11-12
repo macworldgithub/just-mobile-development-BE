@@ -1,24 +1,40 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { Interval } from '@nestjs/schedule';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { CarrierService } from './carrier.service';
 import type { OrderRecord } from './carrier.service';
 
 @Injectable()
-export class CarrierPortingWorker {
+export class CarrierPortingWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CarrierPortingWorker.name);
   private isRunning = false;
+  private intervalRef: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly db: DatabaseService,
     private readonly carrierService: CarrierService,
   ) {}
 
+  onModuleInit() {
+    // Run continuous background polling only in persistent server environments (not in serverless lambdas)
+    if (!process.env.VERCEL) {
+      this.intervalRef = setInterval(() => {
+        this.checkPendingPortingOrders().catch((err) =>
+          this.logger.error(`Error in porting worker loop: ${err.message}`),
+        );
+      }, 30000);
+    }
+  }
+
+  onModuleDestroy() {
+    if (this.intervalRef) {
+      clearInterval(this.intervalRef);
+    }
+  }
+
   /**
    * Periodic background poller checking in-flight mobile porting orders (INT-10)
    * Runs every 30 seconds to reconcile porting statuses with donor networks / Octane.
    */
-  @Interval(30000)
   async checkPendingPortingOrders() {
     if (this.isRunning) return;
     this.isRunning = true;

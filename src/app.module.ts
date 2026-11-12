@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { ScheduleModule } from '@nestjs/schedule';
 import { DatabaseModule } from './database/database.module';
 import { HandsetsModule } from './modules/handsets/handsets.module';
 import { PlansModule } from './modules/plans/plans.module';
@@ -15,7 +14,6 @@ dotenv.config();
 
 @Module({
   imports: [
-    ScheduleModule.forRoot(),
     DatabaseModule,
     CarrierModule,
     NewsletterModule,
