@@ -126,7 +126,9 @@ export class AuthService implements OnModuleInit {
     });
 
     // Send code via Hostinger SMTP
-    this.logger.log(`[TEST / AUDIT] Verification code for ${email}: ${code}`);
+    if (process.env.NODE_ENV !== 'production') {
+      this.logger.log(`[DEV] Verification code for ${email}: ${code}`);
+    }
     await this.mailService.sendVerificationCode(email, code, existingUser?.name);
 
     return {
@@ -275,6 +277,34 @@ export class AuthService implements OnModuleInit {
     };
   }
 
+  private async findUserByIdentifier(identifierRaw: string): Promise<UserDocument | null> {
+    const identifier = identifierRaw.trim();
+    const usersCol = this.db.getCollection<UserDocument>('users');
+
+    if (identifier.includes('@')) {
+      return usersCol.findOne({ email: identifier.toLowerCase() });
+    }
+
+    const cleanCustNo = identifier.toUpperCase().replace(/\s+/g, '');
+    const numericPart = cleanCustNo.replace(/^CUST/i, '');
+    const withCustPrefix = `CUST${numericPart}`;
+    const escaped = cleanCustNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const numericVal = /^\d+$/.test(numericPart) ? parseInt(numericPart, 10) : null;
+
+    const orClauses: any[] = [
+      { custNo: cleanCustNo },
+      { custNo: numericPart },
+      { custNo: withCustPrefix },
+      { custNo: { $regex: new RegExp(`^${escaped}$`, 'i') } },
+      { email: identifier.toLowerCase() },
+    ];
+    if (numericVal !== null && !isNaN(numericVal)) {
+      orClauses.push({ custNo: numericVal });
+    }
+
+    return usersCol.findOne({ $or: orClauses });
+  }
+
   async login(dto: {
     custNo?: string;
     identifier?: string;
@@ -309,25 +339,8 @@ export class AuthService implements OnModuleInit {
         );
       }
     } else {
-      // Customer Portal: support login by custNo (e.g. CUST882104 or 512345) or email
-      const isEmail = identifier.includes('@');
-      if (isEmail) {
-        user = await usersCol.findOne({ email: identifier.toLowerCase() });
-      } else {
-        const cleanCustNo = identifier.toUpperCase().replace(/\s+/g, '');
-        const numericPart = cleanCustNo.replace(/^CUST/i, '');
-        const withCustPrefix = `CUST${numericPart}`;
-        const escaped = cleanCustNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        user = await usersCol.findOne({
-          $or: [
-            { custNo: cleanCustNo },
-            { custNo: numericPart },
-            { custNo: withCustPrefix },
-            { custNo: { $regex: new RegExp(`^${escaped}$`, 'i') } },
-            { email: identifier.toLowerCase() },
-          ],
-        });
-      }
+      // Customer Portal: support login by custNo (e.g. CUST990001 or 551059) or email
+      user = await this.findUserByIdentifier(identifier);
 
       if (!user) {
         throw new NotFoundException(
@@ -382,7 +395,7 @@ export class AuthService implements OnModuleInit {
 
     const userId = user._id!.toString();
     const token = jwt.sign(
-      { sub: userId, email: user.email, role: user.role, name: user.name },
+      { sub: userId, email: user.email, role: user.role, name: user.name, custNo: user.custNo },
       this.jwtSecret,
       { expiresIn: '7d' },
     );
@@ -413,22 +426,7 @@ export class AuthService implements OnModuleInit {
       throw new BadRequestException('Please enter your Customer Number or registered email.');
     }
 
-    const usersCol = this.db.getCollection<UserDocument>('users');
-    let user: UserDocument | null = null;
-
-    if (identifier.includes('@')) {
-      user = await usersCol.findOne({ email: identifier.toLowerCase() });
-    } else {
-      const cleanCustNo = identifier.toUpperCase().replace(/\s+/g, '');
-      const escaped = cleanCustNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      user = await usersCol.findOne({
-        $or: [
-          { custNo: cleanCustNo },
-          { custNo: { $regex: new RegExp(`^${escaped}$`, 'i') } },
-          { email: identifier.toLowerCase() },
-        ],
-      });
-    }
+    const user = await this.findUserByIdentifier(identifier);
 
     if (!user) {
       throw new NotFoundException('No account found with this Customer Number or email address.');
@@ -486,25 +484,7 @@ export class AuthService implements OnModuleInit {
     }
 
     const usersCol = this.db.getCollection<UserDocument>('users');
-    let user: UserDocument | null = null;
-
-    if (identifier.includes('@')) {
-      user = await usersCol.findOne({ email: identifier.toLowerCase() });
-    } else {
-      const cleanCustNo = identifier.toUpperCase().replace(/\s+/g, '');
-      const numericPart = cleanCustNo.replace(/^CUST/i, '');
-      const withCustPrefix = `CUST${numericPart}`;
-      const escaped = cleanCustNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      user = await usersCol.findOne({
-        $or: [
-          { custNo: cleanCustNo },
-          { custNo: numericPart },
-          { custNo: withCustPrefix },
-          { custNo: { $regex: new RegExp(`^${escaped}$`, 'i') } },
-          { email: identifier.toLowerCase() },
-        ],
-      });
-    }
+    const user = await this.findUserByIdentifier(identifier);
 
     if (!user) {
       throw new NotFoundException('Account not found.');
@@ -587,28 +567,47 @@ export class AuthService implements OnModuleInit {
     }
 
     const usersCol = this.db.getCollection<UserDocument>('users');
-    const totalUsers = await usersCol.countDocuments();
-    const customers = await usersCol
-      .find({ role: 'customer' })
-      .project({ passwordHash: 0 })
-      .sort({ createdAt: -1 })
-      .limit(50)
-      .toArray();
-
     const ordersCol = this.db.getCollection('orders');
-    const allOrders = await ordersCol.find({}).toArray();
+
+    const [totalUsers, totalCustomerCount, rawCustomers, allOrders] = await Promise.all([
+      usersCol.countDocuments(),
+      usersCol.countDocuments({ role: 'customer' }),
+      usersCol
+        .find({ role: 'customer' })
+        .project({ passwordHash: 0, pin: 0 })
+        .sort({ createdAt: -1 })
+        .limit(100)
+        .toArray(),
+      ordersCol.find({}).sort({ updatedAt: -1, createdAt: -1 }).toArray(),
+    ]);
+
     const ordersByCust = new Map<string, any>();
     allOrders.forEach((o: any) => {
       if (o.custNo) {
-        ordersByCust.set(o.custNo.toString(), o);
+        const key = o.custNo.toString();
+        if (!ordersByCust.has(key)) {
+          ordersByCust.set(key, o);
+        }
       }
+    });
+
+    const seenKeys = new Set<string>();
+    const customers = rawCustomers.filter((c: any) => {
+      const custNoStr = c.custNo ? String(c.custNo).trim() : '';
+      const emailStr = c.email ? String(c.email).trim().toLowerCase() : '';
+      const dedupeKey = custNoStr && custNoStr !== '—' ? `cust:${custNoStr}` : `email:${emailStr}`;
+      if (seenKeys.has(dedupeKey)) {
+        return false;
+      }
+      seenKeys.add(dedupeKey);
+      return true;
     });
 
     return {
       success: true,
       stats: {
         totalUsers,
-        totalCustomers: customers.length,
+        totalCustomers: totalCustomerCount,
         smtpConfigured: Boolean(process.env.SMTP_USER),
         smtpHost: process.env.SMTP_HOST || 'smtp.hostinger.com',
       },
@@ -644,7 +643,7 @@ export class AuthService implements OnModuleInit {
           custNo: c.custNo || '—',
           name: c.name,
           email: c.email,
-          phone: c.phone || '0488 912 340',
+          phone: c.phone || matchedOrder?.msn || '—',
           role: c.role,
           planName,
           planPrice,

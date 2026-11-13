@@ -59,14 +59,14 @@ export class InvoiceService {
       ? 'JM 10GB Auto (Telstra Wholesale 4G)'
       : 'JM 65GB Auto (Telstra Wholesale 5G)';
     const dataAllowance = isStarter ? '10 GB Monthly 4G Data' : '65 GB Monthly 5G Data';
-    const paymentMethod = custNo === 'CUST882104'
-      ? 'Mastercard ending in 4192 (Auto-Pay)'
+    const paymentMethod = custNo === 'CUST990001'
+      ? 'Mastercard ending in 9001 (Auto-Pay)'
       : `Visa Debit ending in ${custNo.slice(-4) || '0342'} (Auto-Pay)`;
 
     // Default invoices matching billing cycle on 28th
     const sampleInvoices: InvoiceRecord[] = [
       {
-        invoiceId: `INV-2026-10-${custNo.replace(/\D/g, '') || '882104'}`,
+        invoiceId: `INV-2026-10-${custNo.replace(/\D/g, '') || '990001'}`,
         custNo,
         issueDate: '2026-10-28',
         dueDate: '2026-11-28',
@@ -79,10 +79,10 @@ export class InvoiceService {
         amount,
         status: 'PAID',
         paymentMethod,
-        transactionRef: `TXN-QS-${custNo.replace(/\D/g, '') || '882104'}-OCT`,
+        transactionRef: `TXN-QS-${custNo.replace(/\D/g, '') || '990001'}-OCT`,
       },
       {
-        invoiceId: `INV-2026-09-${custNo.replace(/\D/g, '') || '882104'}`,
+        invoiceId: `INV-2026-09-${custNo.replace(/\D/g, '') || '990001'}`,
         custNo,
         issueDate: '2026-09-28',
         dueDate: '2026-10-28',
@@ -95,7 +95,7 @@ export class InvoiceService {
         amount,
         status: 'PAID',
         paymentMethod,
-        transactionRef: `TXN-QS-${custNo.replace(/\D/g, '') || '882104'}-SEP`,
+        transactionRef: `TXN-QS-${custNo.replace(/\D/g, '') || '990001'}-SEP`,
       },
     ];
 

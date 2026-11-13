@@ -234,76 +234,156 @@ export class CarrierService {
     }
   }
 
+  private async findUserDoc(custNo: string): Promise<any> {
+    const usersCol = this.db.getCollection('users');
+    const clean = (custNo || '').trim();
+    const digits = clean.replace(/\D+/g, '');
+    const numericVal = digits ? parseInt(digits, 10) : NaN;
+    const orClauses: any[] = [{ custNo: clean }];
+    if (!isNaN(numericVal)) {
+      orClauses.push({ custNo: numericVal });
+    }
+    return usersCol.findOne({ $or: orClauses });
+  }
+
+  /**
+   * Compute dynamic billing cycle dates anchored on the 28th of each month
+   */
+  private getCurrentBillingCycleDates() {
+    const now = new Date();
+    const year = now.getUTCFullYear();
+    const month = now.getUTCMonth();
+    const day = now.getUTCDate();
+
+    const startDate = day >= 28 ? new Date(Date.UTC(year, month, 28)) : new Date(Date.UTC(year, month - 1, 28));
+    const nextRenewal = day >= 28 ? new Date(Date.UTC(year, month + 1, 28)) : new Date(Date.UTC(year, month, 28));
+    const endDate = new Date(nextRenewal.getTime() - 24 * 60 * 60 * 1000);
+
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    const daysRemaining = Math.max(1, Math.ceil((endDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
+
+    return {
+      periodStart: fmt(startDate),
+      periodEnd: fmt(endDate),
+      nextInvoiceDate: fmt(nextRenewal),
+      lastInvoiceDate: fmt(startDate),
+      daysRemaining,
+    };
+  }
+
   /**
    * Retrieve Customer Details from Carrier
    */
   async getCustomer(custNo: string) {
-    if (process.env.TELCO_LIVE_CREATE !== 'true') {
-      const usersCol = this.db.getCollection('users');
-      const user = await usersCol.findOne({ custNo });
-      return {
-        custNo,
-        name: user?.name || 'Jordan Miller',
-        email: user?.email || 'jordan.miller@example.com',
-        phone: user?.phone || '0491 570 006',
-        status: 'Active',
-        notes: 'Simulated customer record for development',
-      };
+    const user = await this.findUserDoc(custNo);
+    const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(custNo.trim());
+
+    if (isLiveNumeric) {
+      try {
+        const liveRes: any = await this.soapCall('/UtbCustomer', 'getCustomer', {
+          customer: { custNo: custNo.trim() },
+        });
+        const liveCustomer = liveRes?.return?.customer || liveRes?.return || liveRes;
+        if (liveCustomer && typeof liveCustomer === 'object') {
+          return {
+            custNo: custNo.trim(),
+            name: liveCustomer.firstName
+              ? `${liveCustomer.firstName} ${liveCustomer.surname || ''}`.trim()
+              : user?.name || 'Customer',
+            email: liveCustomer.email || user?.email || '',
+            phone: liveCustomer.phone || user?.phone || '',
+            status: liveCustomer.status || 'Active',
+            raw: liveCustomer,
+          };
+        }
+      } catch (err: any) {
+        this.logger.warn(`Live getCustomer fallback for ${custNo}: ${err.message}`);
+      }
     }
 
-    return this.soapCall('/UtbCustomer', 'getCustomer', { customer: { custNo } });
+    return {
+      custNo,
+      name: user?.name || 'Jordan Miller',
+      email: user?.email || 'jordan.miller@example.com',
+      phone: user?.phone || '0491 570 006',
+      status: 'Active',
+    };
   }
 
   /**
    * Retrieve Services associated with Customer
    */
   async getServices(custNo: string) {
-    if (process.env.TELCO_LIVE_CREATE !== 'true') {
-      const ordersCol = this.db.getCollection<OrderRecord>('orders');
-      const userOrders = await ordersCol.find({ custNo }).toArray();
-      const usersCol = this.db.getCollection('users');
-      const userDoc: any = await usersCol.findOne({
-        $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
-      });
+    const cleanCustNo = (custNo || '').trim();
+    const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
 
-      if (userOrders.length > 0) {
-        return {
-          services: userOrders.map((ord, idx) => ({
-            serviceId: `SVC-${ord.orderId}`,
-            serviceNumber: ord.msn || userDoc?.phone || '0488 912 340',
-            serviceType: ord.isEsim ? 'Mobile eSIM 5G' : 'Mobile 5G',
-            planName: userDoc?.legacyData?.plan
-              ? `${userDoc.legacyData.plan} Mobile 5G (${userDoc.legacyData.dataLimitGb || 5}GB)`
-              : ord.planName || '50GB Just right Plan',
-            status: ord.status,
-            lineSeqNo: String(idx + 1),
-          })),
-        };
+    if (isLiveNumeric) {
+      try {
+        const liveRes: any = await this.soapCall('/UtbServices', 'getServices', { custNo: cleanCustNo });
+        const rawServices = liveRes?.return?.services ?? liveRes?.services;
+        const serviceList = Array.isArray(rawServices)
+          ? rawServices
+          : rawServices
+          ? [rawServices]
+          : [];
+
+        if (serviceList.length > 0) {
+          return {
+            services: serviceList.map((svc: any, idx: number) => ({
+              serviceId: svc.serviceId || svc.id || `SVC-${cleanCustNo}-${idx + 1}`,
+              serviceNumber: svc.serviceNumber || svc.msn || svc.number || '0491 570 006',
+              serviceType: svc.serviceType || 'Mobile eSIM 5G',
+              planName: svc.planName || svc.description || 'JM 65GB Auto',
+              status: svc.status || 'Active',
+              lineSeqNo: String(svc.lineSeqNo || idx + 1),
+            })),
+          };
+        }
+      } catch (err: any) {
+        this.logger.warn(`Live getServices fallback for ${cleanCustNo}: ${err.message}`);
       }
+    }
 
-      if (userDoc?.legacyData?.plan || custNo === 'CUST990001') {
-        return {
-          services: [
-            {
-              serviceId: 'SVC-JM-990001',
-              serviceNumber: userDoc?.phone || '0491 570 006',
-              serviceType: 'Mobile eSIM 5G',
-              planName: userDoc?.legacyData?.plan
-                ? `${userDoc.legacyData.plan} Mobile 5G (${userDoc.legacyData.dataLimitGb || 5}GB)`
-                : 'JM 65GB Auto',
-              status: 'Active',
-              lineSeqNo: '1',
-            },
-          ],
-        };
-      }
+    const ordersCol = this.db.getCollection<OrderRecord>('orders');
+    const userOrders = await ordersCol.find({ custNo: cleanCustNo }).sort({ updatedAt: -1 }).toArray();
+    const userDoc: any = await this.findUserDoc(cleanCustNo);
 
+    if (userOrders.length > 0) {
       return {
-        services: [],
+        services: userOrders.map((ord, idx) => ({
+          serviceId: `SVC-${ord.orderId}`,
+          serviceNumber: ord.msn || userDoc?.phone || '0491 570 006',
+          serviceType: ord.isEsim ? 'Mobile eSIM 5G' : 'Mobile 5G',
+          planName: ord.planName
+            || (userDoc?.legacyData?.plan
+              ? `${userDoc.legacyData.plan} Mobile 5G (${userDoc.legacyData.dataLimitGb || 5}GB)`
+              : 'JM 65GB Auto'),
+          status: ord.status,
+          lineSeqNo: String(idx + 1),
+        })),
       };
     }
 
-    return this.soapCall('/UtbServices', 'getServices', { custNo });
+    if (userDoc?.legacyData?.plan || cleanCustNo === 'CUST990001') {
+      return {
+        services: [
+          {
+            serviceId: `SVC-JM-${cleanCustNo.replace(/\D/g, '') || '990001'}`,
+            serviceNumber: userDoc?.phone || '0491 570 006',
+            serviceType: 'Mobile eSIM 5G',
+            planName: userDoc?.legacyData?.plan
+              ? `${userDoc.legacyData.plan} Mobile 5G (${userDoc.legacyData.dataLimitGb || 5}GB)`
+              : 'JM 65GB Auto',
+            status: 'Active',
+            lineSeqNo: '1',
+          },
+        ],
+      };
+    }
+
+    return {
+      services: [],
+    };
   }
 
   // ==========================================================================
@@ -376,7 +456,7 @@ export class CarrierService {
     const isAuMobile = /^04\d{8}$/.test(clean);
 
     if (!isAuMobile) {
-      throw new BadRequestException('Please enter a valid 10-digit Australian mobile number (e.g. 0488 912 340).');
+      throw new BadRequestException('Please enter a valid 10-digit Australian mobile number (e.g. 0491 570 006).');
     }
 
     const formatted = `${clean.slice(0, 4)} ${clean.slice(4, 7)} ${clean.slice(7)}`;
@@ -920,7 +1000,7 @@ export class CarrierService {
       $or: [{ orderId: identifier }, { custNo: identifier }, { msn: identifier.replace(/\s+/g, '') }],
     });
 
-    const activeOrderId = order?.orderId || identifier || 'ORD-882104';
+    const activeOrderId = order?.orderId || identifier || 'ORD-990001';
     const smdpAddress = 'smdp.telcoinabox.com.au';
     const activationCode = `JM-AU-${activeOrderId.replace(/[^a-zA-Z0-9]/g, '')}`;
     const lpa = order?.lpaString || `LPA:1$${smdpAddress}$${activationCode}`;
@@ -1075,7 +1155,10 @@ export class CarrierService {
       success: true,
       transactionId,
       destination: cleanDestination,
-      message: `ACMA security code sent to ${cleanDestination}. (Development Code: ${mockCode})`,
+      message:
+        process.env.NODE_ENV !== 'production'
+          ? `ACMA security code sent to ${cleanDestination}. (Development Code: ${mockCode})`
+          : `ACMA security code sent to ${cleanDestination}.`,
     };
   }
 
@@ -1174,7 +1257,13 @@ export class CarrierService {
     }
 
     const cleanCustNo = custNo.trim();
-    const cleanMsn = (dto.msn || '0488912340').replace(/\s+/g, '');
+    const ordersCol = this.db.getCollection<OrderRecord>('orders');
+    const [existingOrder, userDoc] = await Promise.all([
+      ordersCol.findOne({ custNo: cleanCustNo }, { sort: { updatedAt: -1 } }),
+      this.findUserDoc(cleanCustNo),
+    ]);
+
+    const cleanMsn = (dto.msn || existingOrder?.msn || userDoc?.phone || '0491570006').replace(/\s+/g, '');
     const isLive = process.env.TELCO_LIVE_CREATE === 'true';
 
     const PLAN_ID_TO_NO: Record<string, string> = {
@@ -1211,15 +1300,13 @@ export class CarrierService {
     }
 
     const now = new Date();
-    const ordersCol = this.db.getCollection<OrderRecord>('orders');
 
-    // Update existing orders for this customer, or create one if none exists
-    const existingOrder = await ordersCol.findOne({ custNo: cleanCustNo });
     if (existingOrder) {
       await ordersCol.updateMany(
         { custNo: cleanCustNo },
         {
           $set: {
+            planNo: targetPlanNo,
             planName: dto.planName,
             pricePerMonth: dto.monthlyFee,
             updatedAt: now,
@@ -1227,11 +1314,12 @@ export class CarrierService {
         },
       );
     } else {
+      const orderId = `ORD-${Math.floor(100000 + Math.random() * 900000)}`;
       await ordersCol.insertOne({
-        orderId: `ORD-${Date.now()}`,
+        orderId,
         custNo: cleanCustNo,
         msn: cleanMsn,
-        planNo: dto.planId === 'plan-20gb' ? '13368' : dto.planId === 'plan-100gb' ? '13370' : '13369',
+        planNo: targetPlanNo,
         planName: dto.planName,
         pricePerMonth: dto.monthlyFee,
         status: 'ACTIVE',
@@ -1239,6 +1327,8 @@ export class CarrierService {
         orderAction: 'CHANGE_WME_PLAN',
         isEsim: true,
         isQRcode: true,
+        lpaString: `LPA:1$smdp.telcoinabox.com.au$JM-AU-${orderId}`,
+        email: userDoc?.email,
         createdAt: now,
         updatedAt: now,
       } as any);
@@ -1271,37 +1361,49 @@ export class CarrierService {
    * Get Real-time Monthly Usage & Billing Cycle Meter
    */
   async getUnbilledUsage(custNo: string) {
-    if (process.env.TELCO_LIVE_CREATE === 'true') {
+    const cleanCustNo = (custNo || '').trim();
+    const ordersCol = this.db.getCollection<OrderRecord>('orders');
+    const [latestOrder, userDoc] = await Promise.all([
+      ordersCol.findOne({ custNo: cleanCustNo }, { sort: { updatedAt: -1 } }),
+      this.findUserDoc(cleanCustNo),
+    ]);
+
+    let liveDataUsedGb: number | null = null;
+    const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
+
+    if (isLiveNumeric) {
       try {
-        const numericCustNo = parseInt(custNo.replace(/\D+/g, ''), 10);
-        if (!isNaN(numericCustNo)) {
-          const liveSummary: any = await this.soapCall('/UtbCall', 'getUnbilledCallsSummary', {
-            custNo: numericCustNo,
-          });
-          return liveSummary?.return || liveSummary;
+        const numericCustNo = parseInt(cleanCustNo, 10);
+        const liveSummary: any = await this.soapCall('/UtbCall', 'getUnbilledCallsSummary', {
+          custNo: numericCustNo,
+        });
+        const summary = liveSummary?.return?.unbilledCallsSummary ?? liveSummary?.unbilledCallsSummary;
+        if (summary && typeof summary === 'object') {
+          const mbUsed = parseFloat(summary.dataUsedMb ?? summary.totalDataMb ?? summary.mbUsed);
+          const gbUsed = parseFloat(summary.dataUsedGb ?? summary.totalDataGb ?? summary.gbUsed);
+          if (!isNaN(gbUsed)) {
+            liveDataUsedGb = Number(gbUsed.toFixed(1));
+          } else if (!isNaN(mbUsed)) {
+            liveDataUsedGb = Number((mbUsed / 1024).toFixed(1));
+          }
         }
       } catch (err: any) {
-        this.logger.warn(`Live unbilled usage error: ${err.message}`);
+        this.logger.warn(`Live unbilled usage fallback for ${cleanCustNo}: ${err.message}`);
       }
     }
 
-    // Check customer metadata & orders for exact plan & usage
-    const ordersCol = this.db.getCollection<OrderRecord>('orders');
-    const latestOrder = await ordersCol.findOne(
-      { custNo },
-      { sort: { updatedAt: -1 } },
+    const isTestCustomer = cleanCustNo === 'CUST990001';
+    const hasAnyPlan = Boolean(
+      userDoc?.legacyData?.plan ||
+      userDoc?.legacyData?.dataLimitGb ||
+      latestOrder?.planName ||
+      isTestCustomer ||
+      liveDataUsedGb !== null,
     );
-    const usersCol = this.db.getCollection('users');
-    const userDoc: any = await usersCol.findOne({
-      $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
-    });
-
-    const isTestCustomer = custNo === 'CUST990001';
-    const hasAnyPlan = Boolean(userDoc?.legacyData?.plan || userDoc?.legacyData?.dataLimitGb || latestOrder?.planName || isTestCustomer);
 
     if (!hasAnyPlan) {
       return {
-        custNo,
+        custNo: cleanCustNo,
         hasActivePlan: false,
         billingCycle: 'No active plan',
         cycleDetails: null,
@@ -1310,34 +1412,39 @@ export class CarrierService {
       };
     }
 
+    const cycle = this.getCurrentBillingCycleDates();
     let planTotalGb = 65;
     let dataUsedGb = 7.6;
-    let periodEnd = '2026-11-27';
-    let daysRemaining = 23;
+    let periodEnd = cycle.periodEnd;
+    let daysRemaining = cycle.daysRemaining;
 
     if (userDoc?.legacyData?.dataLimitGb) {
       planTotalGb = userDoc.legacyData.dataLimitGb;
-      dataUsedGb = userDoc.legacyData.dataUsedGb ?? 0.8;
+      dataUsedGb = liveDataUsedGb ?? userDoc.legacyData.dataUsedGb ?? 0.8;
       if (userDoc.legacyData.expiry) {
         periodEnd = userDoc.legacyData.expiry;
         const exp = new Date(periodEnd);
-        daysRemaining = Math.max(1, Math.ceil((exp.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+        if (!isNaN(exp.getTime())) {
+          daysRemaining = Math.max(1, Math.ceil((exp.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+        }
       }
     } else if (latestOrder?.planName) {
       const match = latestOrder.planName.match(/(\d+)GB/i);
       planTotalGb = match ? parseInt(match[1], 10) : (latestOrder.pricePerMonth === 20.54 ? 10 : 65);
-      dataUsedGb = Number((planTotalGb * 0.15).toFixed(1));
+      dataUsedGb = liveDataUsedGb ?? Number((planTotalGb * 0.15).toFixed(1));
+    } else if (liveDataUsedGb !== null) {
+      dataUsedGb = liveDataUsedGb;
     }
 
     const dataRemainingGb = Number(Math.max(0, planTotalGb - dataUsedGb).toFixed(1));
     const percentRemaining = Number(((dataRemainingGb / planTotalGb) * 100).toFixed(1));
 
     return {
-      custNo,
+      custNo: cleanCustNo,
       hasActivePlan: true,
       billingCycle: '28th of every month',
       cycleDetails: {
-        periodStart: '2026-10-28',
+        periodStart: cycle.periodStart,
         periodEnd,
         daysRemaining,
       },
@@ -1364,33 +1471,39 @@ export class CarrierService {
    * Retrieve Current Balance and Invoicing Info
    */
   async getBalance(custNo: string) {
-    if (process.env.TELCO_LIVE_CREATE === 'true') {
+    const cleanCustNo = (custNo || '').trim();
+    const ordersCol = this.db.getCollection<OrderRecord>('orders');
+    const [latestOrder, userDoc] = await Promise.all([
+      ordersCol.findOne({ custNo: cleanCustNo }, { sort: { updatedAt: -1 } }),
+      this.findUserDoc(cleanCustNo),
+    ]);
+
+    let liveCurrBalance = 0.0;
+    const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
+
+    if (isLiveNumeric) {
       try {
-        return await this.soapCall('/UtbCustomer', 'getCurrBalance', { customer: { custNo } });
+        const liveRes: any = await this.soapCall('/UtbCustomer', 'getCurrBalance', {
+          customer: { custNo: cleanCustNo },
+        });
+        const parsed = parseFloat(liveRes?.return?.currBalance ?? liveRes?.currBalance ?? '0');
+        if (!isNaN(parsed)) {
+          liveCurrBalance = parsed;
+        }
       } catch (err: any) {
-        this.logger.warn(`Live getCurrBalance error: ${err.message}`);
+        this.logger.warn(`Live getCurrBalance fallback for ${cleanCustNo}: ${err.message}`);
       }
     }
 
-    const ordersCol = this.db.getCollection<OrderRecord>('orders');
-    const latestOrder = await ordersCol.findOne(
-      { custNo },
-      { sort: { updatedAt: -1 } },
-    );
-    const usersCol = this.db.getCollection('users');
-    const userDoc: any = await usersCol.findOne({
-      $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
-    });
-
-    const isTestCustomer = custNo === 'CUST990001';
+    const isTestCustomer = cleanCustNo === 'CUST990001';
     const hasAnyPlan = Boolean(userDoc?.legacyData?.plan || latestOrder?.planName || isTestCustomer);
 
     if (!hasAnyPlan) {
       return {
-        custNo,
+        custNo: cleanCustNo,
         hasActivePlan: false,
-        currentBalance: 0.0,
-        formattedBalance: '$0.00',
+        currentBalance: liveCurrBalance,
+        formattedBalance: `$${liveCurrBalance.toFixed(2)}`,
         lastInvoiceAmount: 0.0,
         lastInvoiceDate: null,
         nextInvoiceDate: null,
@@ -1400,21 +1513,20 @@ export class CarrierService {
       };
     }
 
+    const cycle = this.getCurrentBillingCycleDates();
     const isStarter = userDoc?.legacyData?.plan === 'Starter';
     const nextAmount = isStarter ? 20.54 : (latestOrder?.pricePerMonth || 37.55);
     const lastAmount = isStarter ? 20.54 : (latestOrder?.pricePerMonth || 37.55);
-
-    const paymentMethod = custNo === 'CUST882104'
-      ? 'Mastercard ending in 4192'
-      : `Visa Debit ending in ${custNo.slice(-4) || '0481'}`;
+    const paymentMethod = `Visa Debit ending in ${cleanCustNo.replace(/\D/g, '').slice(-4) || '0481'}`;
 
     return {
-      custNo,
-      currentBalance: 0.0,
-      formattedBalance: '$0.00',
+      custNo: cleanCustNo,
+      hasActivePlan: true,
+      currentBalance: liveCurrBalance,
+      formattedBalance: `$${liveCurrBalance.toFixed(2)}`,
       lastInvoiceAmount: lastAmount,
-      lastInvoiceDate: '2026-10-28',
-      nextInvoiceDate: '2026-11-28',
+      lastInvoiceDate: cycle.lastInvoiceDate,
+      nextInvoiceDate: cycle.nextInvoiceDate,
       nextInvoiceAmount: nextAmount,
       autoPayStatus: 'Active',
       paymentMethod,

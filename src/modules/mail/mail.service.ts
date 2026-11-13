@@ -25,6 +25,11 @@ export class MailService {
     this.initTransporter();
   }
 
+  private getPortalUrl(path = '/account'): string {
+    const base = (process.env.FRONTEND_URL || 'https://justmobile.com.au').replace(/\/+$/, '');
+    return `${base}${path.startsWith('/') ? path : `/${path}`}`;
+  }
+
   private initTransporter() {
     const host = process.env.SMTP_HOST || 'smtp.hostinger.com';
     const port = parseInt(process.env.SMTP_PORT || '465', 10);
@@ -267,7 +272,7 @@ export class MailService {
       </div>
 
       <div class="btn-wrap">
-        <a href="http://localhost:3000/account" class="btn">Go to My Account &rarr;</a>
+        <a href="${this.getPortalUrl('/account')}" class="btn">Go to My Account &rarr;</a>
       </div>
     </div>
     <div class="footer">
@@ -371,7 +376,7 @@ export class MailService {
       <p>Once your SIM arrives in the mail, simply pop it into your handset and you'll be connected to Telstra Wholesale 5G.</p>
 
       <div class="btn-wrap">
-        <a href="http://localhost:3000/account" class="btn">View Customer Portal &rarr;</a>
+        <a href="${this.getPortalUrl('/account')}" class="btn">View Customer Portal &rarr;</a>
       </div>
     </div>
     <div class="footer">
@@ -495,7 +500,7 @@ export class MailService {
       <div class="qr-card">
         <div class="qr-title">Scan this QR Code with your Phone</div>
         <div class="qr-tip">
-          💡 <strong>Tip for scanning:</strong> If you are viewing this on your smartphone, open this email on a computer, tablet, or another phone screen, then point your mobile camera at this code.
+          <strong>Tip for scanning:</strong> If you are viewing this on your smartphone, open this email on a computer, tablet, or another phone screen, then point your mobile camera at this code.
         </div>
         <div class="qr-img-wrap">
           <img src="cid:esim-qr-code" alt="JustMobile eSIM Activation QR" width="220" height="220" style="display: block; border-radius: 8px;" />
@@ -534,7 +539,7 @@ export class MailService {
       </div>
 
       <div class="btn-wrap">
-        <a href="http://localhost:3000/account" class="btn">Open Customer Portal &rarr;</a>
+        <a href="${this.getPortalUrl('/account')}" class="btn">Open Customer Portal &rarr;</a>
       </div>
     </div>
 
@@ -553,7 +558,7 @@ export class MailService {
           from: sender,
           to,
           subject: `Your JustMobile Telstra 5G eSIM is ready! – Scan QR Code to Activate (${formattedMsn})`,
-          text: `G'day! Your JustMobile eSIM for ${formattedMsn} is ready. Open your device Settings > Mobile > Add eSIM and scan your QR code. SM-DP+ Address: ${smdpAddress}, Activation Code: ${activationCode}, LPA String: ${lpaString}. View in portal: http://localhost:3000/account`,
+          text: `G'day! Your JustMobile eSIM for ${formattedMsn} is ready. Open your device Settings > Mobile > Add eSIM and scan your QR code. SM-DP+ Address: ${smdpAddress}, Activation Code: ${activationCode}, LPA String: ${lpaString}. View in portal: ${this.getPortalUrl('/account')}`,
           html: esimHtml,
           attachments: qrBuffer && qrBuffer.length > 0 ? [
             {

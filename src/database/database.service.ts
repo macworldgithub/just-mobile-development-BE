@@ -19,10 +19,27 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       this.client = new MongoClient(uri);
       await this.client.connect();
       this.db = this.client.db('just_mobile_development');
-      this.logger.log('✓ Successfully connected to MongoDB database (just_mobile_development).');
+      this.logger.log('Successfully connected to MongoDB database (just_mobile_development).');
+      this.ensureIndexes().catch((err) =>
+        this.logger.warn(`Failed to ensure MongoDB indexes: ${err.message}`),
+      );
     } catch (error) {
       this.logger.error('Failed to connect to MongoDB:', error);
     }
+  }
+
+  private async ensureIndexes() {
+    if (!this.db) return;
+    await Promise.all([
+      this.db.collection('users').createIndex({ email: 1 }, { background: true }),
+      this.db.collection('users').createIndex({ custNo: 1 }, { background: true }),
+      this.db.collection('users').createIndex({ role: 1, createdAt: -1 }, { background: true }),
+      this.db.collection('orders').createIndex({ orderId: 1 }, { background: true }),
+      this.db.collection('orders').createIndex({ custNo: 1, updatedAt: -1 }, { background: true }),
+      this.db.collection('invoices').createIndex({ custNo: 1, issueDate: -1 }, { background: true }),
+      this.db.collection('email_verifications').createIndex({ email: 1, code: 1, used: 1 }, { background: true }),
+      this.db.collection('newsletter_subscribers').createIndex({ email: 1 }, { background: true }),
+    ]);
   }
 
   async onModuleDestroy() {
