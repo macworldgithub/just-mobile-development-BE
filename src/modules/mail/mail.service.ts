@@ -259,7 +259,7 @@ export class MailService {
       <div class="cust-card">
         <div class="cust-label">Your JustMobile Customer Number</div>
         <div class="cust-no">${custNo}</div>
-        <div class="cust-sub">Keep this reference handy whenever managing services or contacting support.</div>
+        <div class="cust-sub">Keep this reference handy whenever managing services or contacting support (info@justmobile.ai · 1300 492 002).</div>
       </div>
 
       <div class="next-steps">

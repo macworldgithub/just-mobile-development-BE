@@ -1,5 +1,6 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, Inject, forwardRef } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { CarrierService } from './carrier.service';
 import PDFDocument from 'pdfkit';
 
 export interface InvoiceRecord {
@@ -23,7 +24,11 @@ export interface InvoiceRecord {
 export class InvoiceService {
   private readonly logger = new Logger(InvoiceService.name);
 
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    @Inject(forwardRef(() => CarrierService))
+    private readonly carrierService: CarrierService,
+  ) {}
 
   /**
    * Retrieve list of customer tax invoices
@@ -31,37 +36,65 @@ export class InvoiceService {
   async getCustomerInvoices(custNo: string): Promise<InvoiceRecord[]> {
     const invoicesCol = this.db.getCollection<InvoiceRecord>('invoices');
     const existing = await invoicesCol.find({ custNo }).sort({ issueDate: -1 }).toArray();
+    const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test((custNo || '').trim());
 
-    if (existing.length > 0) {
+    const hasOnlyStaleMockInvoices =
+      isLiveNumeric &&
+      existing.length > 0 &&
+      existing.every(
+        (inv) =>
+          String(inv.transactionRef || '').startsWith('TXN-QS-') &&
+          /Starter Mobile|Standard Mobile|SimplyBig/i.test(String(inv.planName || '')),
+      );
+
+    if (existing.length > 0 && !hasOnlyStaleMockInvoices) {
       return existing;
     }
 
-    const ordersCol = this.db.getCollection('orders');
-    const userOrders = await ordersCol.find({ custNo }).toArray();
     const isTestCustomer = custNo === 'CUST990001';
 
-    // Lookup customer and plan to generate accurate amounts
-    const usersCol = this.db.getCollection('users');
-    const userDoc: any = await usersCol.findOne({
-      $or: [{ custNo }, { custNo: parseInt(custNo.replace(/\D+/g, ''), 10) }],
-    });
+    let activePlanName = 'JM 65GB Auto';
+    let activeDataGb = 65;
+    let amount = 37.55;
+    let hasActivePlan = isTestCustomer;
 
-    const hasAnyPlan = Boolean(userDoc?.legacyData?.plan || userOrders.length > 0 || isTestCustomer);
-    if (!hasAnyPlan) {
+    if (isLiveNumeric) {
+      const [custRes, svcRes] = await Promise.allSettled([
+        this.carrierService.getCustomer(custNo),
+        this.carrierService.getServices(custNo),
+      ]);
+      const customerStatus = custRes.status === 'fulfilled' ? custRes.value?.status : 'Active';
+      const services = svcRes.status === 'fulfilled' ? svcRes.value?.services || [] : [];
+      if (customerStatus === 'Disconnected' || services.length === 0) {
+        return [];
+      }
+      const primarySvc: any = services[0];
+      const resolved = this.carrierService.resolvePlanDetails(primarySvc.planName, primarySvc.planNo);
+      hasActivePlan = true;
+      activePlanName = resolved?.name || primarySvc.planName;
+      activeDataGb = resolved?.dataGb || 65;
+      amount = resolved?.price ?? primarySvc.planPrice ?? 37.55;
+    } else if (!isTestCustomer) {
+      const ordersCol = this.db.getCollection('orders');
+      const userOrders = await ordersCol.find({ custNo }).toArray();
+      if (userOrders.length === 0) return [];
+      hasActivePlan = true;
+      activePlanName = userOrders[0].planName || activePlanName;
+      amount = userOrders[0].pricePerMonth || amount;
+    }
+
+    if (!hasActivePlan) {
       return [];
     }
 
-    const isStarter = userDoc?.legacyData?.plan === 'Starter';
-    const amount = isStarter ? 20.54 : 37.55;
     const gstAmount = Number((amount / 11).toFixed(2));
     const subtotal = Number((amount - gstAmount).toFixed(2));
-    const planName = isStarter
-      ? 'JM 10GB Auto (Telstra Wholesale 4G)'
-      : 'JM 65GB Auto (Telstra Wholesale 5G)';
-    const dataAllowance = isStarter ? '10 GB Monthly 4G Data' : '65 GB Monthly 5G Data';
+    const networkTier = activeDataGb >= 65 ? '5G' : '4G';
+    const planName = `${activePlanName} (Telstra Wholesale ${networkTier})`;
+    const dataAllowance = `${activeDataGb} GB Monthly ${networkTier} Data`;
     const paymentMethod = custNo === 'CUST990001'
       ? 'Mastercard ending in 9001 (Auto-Pay)'
-      : `Visa Debit ending in ${custNo.slice(-4) || '0342'} (Auto-Pay)`;
+      : `Direct Debit ending in ${custNo.slice(-4) || '0342'} (Auto-Pay)`;
 
     // Default invoices matching billing cycle on 28th
     const sampleInvoices: InvoiceRecord[] = [
@@ -185,7 +218,7 @@ export class InvoiceService {
         doc.text('Level 14, 182 George Street', 45, y + 28);
         doc.text('Sydney NSW 2000, Australia', 45, y + 40);
         doc.text('Web: www.justmobile.com.au', 45, y + 52);
-        doc.text('Support: support@justmobile.com.au', 45, y + 64);
+        doc.text('Support: info@justmobile.ai · 1300 492 002', 45, y + 64);
 
         // Invoice Metadata Box (Right)
         const metaBoxX = doc.page.width - 240;
@@ -309,7 +342,7 @@ export class InvoiceService {
 
         const legalNotice =
           '1. This document is a formal Australian Tax Invoice issued in accordance with A New Tax System (Goods and Services Tax) Act 1999.\n' +
-          '2. Telecommunications Consumer Protections Code (TCP C628): Inquiries, plan changes, or billing disputes may be raised via the Customer Portal or by emailing billing@justmobile.com.au.\n' +
+          '2. Telecommunications Consumer Protections Code (TCP C628): Inquiries, plan changes, or billing disputes may be raised via the Customer Portal, by emailing info@justmobile.ai, or calling 1300 492 002.\n' +
           '3. If you are experiencing financial hardship, free assistance and flexible payment arrangements are available under our Financial Hardship Policy at justmobile.com.au/hardship.\n' +
           '4. Telecommunications Industry Ombudsman (TIO): If a complaint remains unresolved, you have the right to contact the independent TIO on 1800 062 058 or visit www.tio.com.au.';
 
@@ -329,6 +362,127 @@ export class InvoiceService {
         reject(err);
       }
     });
+  }
+
+  /**
+   * Process a one-off "Pay Now" invoice or balance payment
+   */
+  async payNow(
+    custNo: string,
+    dto: {
+      amount: number;
+      invoiceId?: string;
+      cardName?: string;
+      cardLast4?: string;
+      paymentMethod?: string;
+    },
+  ) {
+    const amount = Number(dto.amount);
+    if (!amount || isNaN(amount) || amount <= 0) {
+      throw new BadRequestException('A valid positive payment amount is required.');
+    }
+
+    const transactionRef = `PAY-JM-${Date.now().toString().slice(-6)}`;
+    const paidAt = new Date();
+    const maskedLast4 = (dto.cardLast4 || '4242').replace(/\D/g, '').slice(-4) || '4242';
+    const paymentMethod = dto.paymentMethod || `Visa/Mastercard ending in ${maskedLast4}`;
+
+    const auditCol = this.db.getCollection('audit_events');
+    await auditCol.insertOne({
+      recordType: 'payment',
+      transactionRef,
+      custNo,
+      invoiceId: dto.invoiceId || null,
+      amount: Number(amount.toFixed(2)),
+      paymentMethod,
+      cardName: dto.cardName || 'Account Holder',
+      status: 'PAID',
+      paidAt,
+      createdAt: paidAt,
+    });
+
+    const invoicesCol = this.db.getCollection<InvoiceRecord>('invoices');
+    if (dto.invoiceId) {
+      await invoicesCol.updateOne(
+        { custNo, invoiceId: dto.invoiceId },
+        { $set: { status: 'PAID', transactionRef, paymentMethod } },
+      );
+    }
+
+    this.logger.log(`✓ One-off payment ${transactionRef} ($${amount.toFixed(2)}) recorded for custNo ${custNo}`);
+
+    return {
+      success: true,
+      transactionRef,
+      amount: Number(amount.toFixed(2)),
+      paymentMethod,
+      paidAt: paidAt.toISOString(),
+      message: `Payment of $${amount.toFixed(2)} AUD processed successfully (Ref: ${transactionRef}).`,
+    };
+  }
+
+  /**
+   * Lodge a billing enquiry or dispute for a specific invoice
+   */
+  async submitBillQuery(
+    custNo: string,
+    dto: {
+      invoiceId: string;
+      category?: string;
+      message: string;
+      email?: string;
+      name?: string;
+    },
+  ) {
+    const cleanMessage = (dto.message || '').trim();
+    if (!cleanMessage || cleanMessage.length < 5) {
+      throw new BadRequestException('Please describe your billing question or dispute (minimum 5 characters).');
+    }
+
+    const queryId = `BQ-JM-${Math.floor(100000 + Math.random() * 900000)}`;
+    const createdAt = new Date();
+
+    const doc = {
+      recordType: 'bill_query',
+      queryId,
+      custNo,
+      invoiceId: dto.invoiceId || 'GENERAL',
+      category: dto.category || 'Unfamiliar Charge / Bill Question',
+      message: cleanMessage,
+      email: dto.email || '',
+      name: dto.name || '',
+      status: 'OPEN',
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    const auditCol = this.db.getCollection('audit_events');
+    await auditCol.insertOne(doc);
+
+    this.logger.log(`✓ Bill query ${queryId} logged for custNo ${custNo} (Invoice: ${doc.invoiceId})`);
+
+    return {
+      success: true,
+      queryId,
+      status: 'OPEN',
+      query: doc,
+      message: `Billing query ${queryId} submitted. Our team (info@justmobile.ai / 1300 492 002) will respond within 2 business days.`,
+    };
+  }
+
+  /**
+   * Retrieve customer bill queries
+   */
+  async getBillQueries(custNo: string) {
+    const auditCol = this.db.getCollection('audit_events');
+    const queries = await auditCol
+      .find({ custNo, recordType: 'bill_query' })
+      .sort({ createdAt: -1 })
+      .toArray();
+    return {
+      success: true,
+      queries,
+    };
   }
 }
 

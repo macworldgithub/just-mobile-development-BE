@@ -1,8 +1,9 @@
-import { Controller, Post, Get, Param, Body, Query, Res, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Get, Param, Body, Query, Res, Headers, Inject, forwardRef, HttpCode, HttpStatus } from '@nestjs/common';
 import type { Response } from 'express';
 import { CarrierService } from './carrier.service';
 import { InvoiceService } from './invoice.service';
 import { CarrierPortingWorker } from './carrier-porting.worker';
+import { AuthService } from '../auth/auth.service';
 import type { CarrierCustomerInput, ActivateOrderInput, ActivatePortOrderInput } from './carrier.service';
 
 @Controller('api/carrier')
@@ -11,6 +12,8 @@ export class CarrierController {
     private readonly carrierService: CarrierService,
     private readonly invoiceService: InvoiceService,
     private readonly portingWorker: CarrierPortingWorker,
+    @Inject(forwardRef(() => AuthService))
+    private readonly authService: AuthService,
   ) {}
 
   // ==========================================================================
@@ -52,6 +55,7 @@ export class CarrierController {
   @HttpCode(HttpStatus.OK)
   async changePlan(
     @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader: string | undefined,
     @Body()
     body: {
       planId?: string;
@@ -60,8 +64,10 @@ export class CarrierController {
       dataGb: number;
       dataBankMaxGb?: number;
       msn?: string;
+      twoFactorCode?: string;
     },
   ) {
+    await this.authService.verifyActionTwoFactorForHeader(authHeader, body.twoFactorCode || '');
     return this.carrierService.changePlan(custNo, body);
   }
 
@@ -85,6 +91,43 @@ export class CarrierController {
     res.setHeader('Content-Disposition', `attachment; filename="JustMobile-Tax-Invoice-${invoiceId}.pdf"`);
     res.setHeader('Content-Length', pdfBuffer.length);
     res.end(pdfBuffer);
+  }
+
+  @Post('customers/:custNo/pay-now')
+  @HttpCode(HttpStatus.OK)
+  async payNow(
+    @Param('custNo') custNo: string,
+    @Body()
+    body: {
+      amount: number;
+      invoiceId?: string;
+      cardName?: string;
+      cardLast4?: string;
+      paymentMethod?: string;
+    },
+  ) {
+    return this.invoiceService.payNow(custNo, body);
+  }
+
+  @Post('customers/:custNo/bill-query')
+  @HttpCode(HttpStatus.CREATED)
+  async submitBillQuery(
+    @Param('custNo') custNo: string,
+    @Body()
+    body: {
+      invoiceId: string;
+      category?: string;
+      message: string;
+      email?: string;
+      name?: string;
+    },
+  ) {
+    return this.invoiceService.submitBillQuery(custNo, body);
+  }
+
+  @Get('customers/:custNo/bill-queries')
+  async getBillQueries(@Param('custNo') custNo: string) {
+    return this.invoiceService.getBillQueries(custNo);
   }
 
   // ==========================================================================

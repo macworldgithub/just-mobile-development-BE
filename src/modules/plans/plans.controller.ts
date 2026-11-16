@@ -7,10 +7,10 @@ export class PlansController {
 
   @Get()
   async getPlans() {
-    const data = await this.plansService.getAllPlans();
+    const { source, data } = await this.plansService.getAllPlans();
     return {
       success: true,
-      source: 'mongodb-backend',
+      source,
       count: data.length,
       data,
     };
@@ -24,7 +24,7 @@ export class PlansController {
     }
     return {
       success: true,
-      source: 'mongodb-backend',
+      source: plan.syncedWithOctane ? 'octane-live' : 'mongodb-backend',
       data: plan,
     };
   }

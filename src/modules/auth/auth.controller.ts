@@ -57,10 +57,89 @@ export class AuthController {
       password?: string;
       pin?: string;
       code?: string;
+      twoFactorCode?: string;
       portal?: 'customer' | 'admin';
     },
   ) {
     return this.authService.login(body);
+  }
+
+  @Post('login/verify-2fa')
+  @HttpCode(HttpStatus.OK)
+  async verifyLoginTwoFactor(
+    @Body()
+    body: {
+      preAuthToken: string;
+      code: string;
+      method?: 'totp' | 'email';
+    },
+  ) {
+    return this.authService.verifyLoginTwoFactor(body);
+  }
+
+  @Post('login/send-email-otp')
+  @HttpCode(HttpStatus.OK)
+  async sendLoginEmailOtp(@Body() body: { preAuthToken: string }) {
+    return this.authService.sendLoginEmailOtp(body.preAuthToken);
+  }
+
+  @Get('2fa/status')
+  async getTwoFactorStatus(@Headers('authorization') authHeader?: string) {
+    return this.authService.getTwoFactorStatus(authHeader);
+  }
+
+  @Post('2fa/setup')
+  @HttpCode(HttpStatus.OK)
+  async setupTwoFactor(@Headers('authorization') authHeader?: string) {
+    return this.authService.setupTwoFactor(authHeader);
+  }
+
+  @Post('2fa/enable')
+  @HttpCode(HttpStatus.OK)
+  async enableTwoFactor(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body: { code: string },
+  ) {
+    return this.authService.enableTwoFactor(authHeader, body.code);
+  }
+
+  @Post('2fa/disable')
+  @HttpCode(HttpStatus.OK)
+  async disableTwoFactor(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body: { code: string },
+  ) {
+    return this.authService.disableTwoFactor(authHeader, body.code);
+  }
+
+  @Post('2fa/send-action-code')
+  @HttpCode(HttpStatus.OK)
+  async sendActionTwoFactorCode(@Headers('authorization') authHeader?: string) {
+    return this.authService.sendActionTwoFactorCode(authHeader);
+  }
+
+  @Post('profile/update')
+  @HttpCode(HttpStatus.OK)
+  async updateProfile(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body()
+    body: {
+      firstName?: string;
+      surname?: string;
+      preferredName?: string;
+      email?: string;
+      phone?: string;
+      address?: string;
+      suburb?: string;
+      state?: string;
+      postcode?: string;
+      postalAddress?: string;
+      commPreference?: 'email' | 'sms' | 'both';
+      marketingConsent?: boolean;
+      twoFactorCode: string;
+    },
+  ) {
+    return this.authService.updateProfile(authHeader, body);
   }
 
   @Post('forgot-password')

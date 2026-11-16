@@ -84,6 +84,20 @@ export class CarrierService {
   private readonly benzinePassword: string;
   private readonly groupNo: string;
   private readonly quickstreamApiKey: string;
+  private cachedGroupPlans: { expiresAt: number; data: any[] } | null = null;
+  private cachedOctaneCustomers: { expiresAt: number; map: Map<string, any> } | null = null;
+  private readonly soapClientCache = new Map<string, Promise<any>>();
+
+  private readonly OCTANE_RETAIL_PLANS = [
+    { id: 'plan-10gb', planNo: '11144153', name: 'JM 10GB Auto', dataGb: 10, price: 20.54, network: '4G' },
+    { id: 'plan-15gb', planNo: '11144154', name: 'JM 15GB Auto', dataGb: 15, price: 24.6, network: '4G' },
+    { id: 'plan-29gb', planNo: '11144155', name: 'JM 29GB Auto', dataGb: 29, price: 28.53, network: '4G' },
+    { id: 'plan-65gb', planNo: '11144157', name: 'JM 65GB Auto', dataGb: 65, price: 37.55, network: '5G' },
+    { id: 'plan-100gb', planNo: '11144168', name: 'JM 100GB Auto', dataGb: 100, price: 46.4, network: '5G' },
+    { id: 'plan-120gb', planNo: '11144169', name: 'JM 120GB Auto', dataGb: 120, price: 54.86, network: '5G' },
+    { id: 'plan-150gb', planNo: '11144170', name: 'JM 150GB Auto', dataGb: 150, price: 59.89, network: '5G' },
+    { id: 'plan-180gb', planNo: '11156014', name: 'JM 180GB Auto', dataGb: 180, price: 67.0, network: '5G' },
+  ];
 
   constructor(
     private readonly db: DatabaseService,
@@ -113,6 +127,17 @@ export class CarrierService {
     };
   }
 
+  private getSoapClient(wsdlUrl: string): Promise<any> {
+    if (!this.soapClientCache.has(wsdlUrl)) {
+      const clientPromise = soap.createClientAsync(wsdlUrl).catch((err) => {
+        this.soapClientCache.delete(wsdlUrl);
+        throw err;
+      });
+      this.soapClientCache.set(wsdlUrl, clientPromise);
+    }
+    return this.soapClientCache.get(wsdlUrl)!;
+  }
+
   /**
    * Generic SOAP call to Telcoinabox / Octane or Benzine WSDL
    */
@@ -126,7 +151,7 @@ export class CarrierService {
     this.logger.log(`Invoking Carrier SOAP: ${methodName} @ ${wsdlUrl}`);
 
     try {
-      const client: any = await soap.createClientAsync(wsdlUrl);
+      const client: any = await this.getSoapClient(wsdlUrl);
       return new Promise((resolve, reject) => {
         client[methodName](fullArgs, (err: any, result: any) => {
           if (err) {
@@ -272,41 +297,142 @@ export class CarrierService {
   }
 
   /**
+   * Normalize Octane status strings (supports 'DIS', 'Disconnected', 'SUS', 'Suspended', etc.)
+   */
+  normalizeOctaneStatus(rawStatus?: string): 'Active' | 'Disconnected' | 'Suspended' {
+    const clean = String(rawStatus || '').trim();
+    if (/^(dis|disconnect)/i.test(clean)) return 'Disconnected';
+    if (/suspend/i.test(clean)) return 'Suspended';
+    return 'Active';
+  }
+
+  /**
+   * Resolve retail plan metadata from an Octane planNo or planName
+   */
+  resolvePlanDetails(planName?: string, planNo?: string | number) {
+    const noStr = planNo !== undefined && planNo !== null ? String(planNo).trim() : '';
+    const nameStr = String(planName || '').trim().toLowerCase();
+
+    if (noStr === '11144171') {
+      return this.OCTANE_RETAIL_PLANS.find((p) => p.id === 'plan-180gb')!;
+    }
+    if (noStr) {
+      const byNo = this.OCTANE_RETAIL_PLANS.find((p) => p.planNo === noStr);
+      if (byNo) return byNo;
+    }
+    if (nameStr) {
+      const byName = this.OCTANE_RETAIL_PLANS.find(
+        (p) =>
+          p.name.toLowerCase() === nameStr ||
+          nameStr.includes(`${p.dataGb}gb`),
+      );
+      if (byName) return byName;
+    }
+    return null;
+  }
+
+  /**
+   * Read-only: Retrieve group plans directly from Octane (/UtbPlan getGroupPlans)
+   */
+  async getGroupPlans(): Promise<Array<{ planNo: number; planName: string; usageType: string }>> {
+    if (this.cachedGroupPlans && Date.now() < this.cachedGroupPlans.expiresAt) {
+      return this.cachedGroupPlans.data;
+    }
+    if (process.env.TELCO_LIVE_CREATE !== 'true') {
+      return [];
+    }
+    const res: any = await this.soapCall('/UtbPlan', 'getGroupPlans', {
+      group: { groupNo: this.groupNo || '922' },
+    });
+    const raw = res?.return?.groupPlan ?? [];
+    const list = (Array.isArray(raw) ? raw : [raw]).filter(Boolean);
+    this.cachedGroupPlans = {
+      expiresAt: Date.now() + 60_000,
+      data: list,
+    };
+    return list;
+  }
+
+  /**
+   * Read-only: Retrieve all customers in the reseller group from Octane (/UtbCustomer getCustomers)
+   */
+  async getAllCustomersFromOctane(): Promise<Map<string, any>> {
+    if (this.cachedOctaneCustomers && Date.now() < this.cachedOctaneCustomers.expiresAt) {
+      return this.cachedOctaneCustomers.map;
+    }
+    const map = new Map<string, any>();
+    if (process.env.TELCO_LIVE_CREATE !== 'true') {
+      return map;
+    }
+    try {
+      const res: any = await this.soapCall('/UtbCustomer', 'getCustomers', {
+        groupNo: parseInt(this.groupNo || '922', 10),
+      });
+      const raw = res?.return?.customer ?? [];
+      const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+      for (const c of list) {
+        if (c?.custNo) {
+          map.set(String(c.custNo).trim(), c);
+        }
+      }
+      this.cachedOctaneCustomers = {
+        expiresAt: Date.now() + 60_000,
+        map,
+      };
+    } catch (err: any) {
+      this.logger.warn(`Live getCustomers fallback triggered: ${err.message}`);
+    }
+    return map;
+  }
+
+  /**
    * Retrieve Customer Details from Carrier
    */
   async getCustomer(custNo: string) {
-    const user = await this.findUserDoc(custNo);
-    const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(custNo.trim());
+    const cleanCustNo = (custNo || '').trim();
+    const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
 
     if (isLiveNumeric) {
       try {
         const liveRes: any = await this.soapCall('/UtbCustomer', 'getCustomer', {
-          customer: { custNo: custNo.trim() },
+          customer: { custNo: cleanCustNo },
         });
         const liveCustomer = liveRes?.return?.customer || liveRes?.return || liveRes;
-        if (liveCustomer && typeof liveCustomer === 'object') {
+        if (liveCustomer && typeof liveCustomer === 'object' && !liveCustomer.isError) {
+          const normalizedStatus = this.normalizeOctaneStatus(
+            liveCustomer.category_status_customer || liveCustomer.status,
+          );
+          const fullName = [liveCustomer.firstName, liveCustomer.surname].filter(Boolean).join(' ').trim();
           return {
-            custNo: custNo.trim(),
-            name: liveCustomer.firstName
-              ? `${liveCustomer.firstName} ${liveCustomer.surname || ''}`.trim()
-              : user?.name || 'Customer',
-            email: liveCustomer.email || user?.email || '',
-            phone: liveCustomer.phone || user?.phone || '',
-            status: liveCustomer.status || 'Active',
+            custNo: cleanCustNo,
+            name: fullName || liveCustomer.company || `Customer ${cleanCustNo}`,
+            firstName: liveCustomer.firstName || '',
+            surname: liveCustomer.surname || '',
+            email: liveCustomer.email || liveCustomer.orderNotificationEmail || liveCustomer.authEmail || '',
+            phone: liveCustomer.phone || liveCustomer.mobile || '',
+            address: liveCustomer.address || '',
+            suburb: liveCustomer.suburb || '',
+            state: liveCustomer.state || '',
+            postcode: liveCustomer.postcode || '',
+            dob: liveCustomer.dob || '',
+            planNo: liveCustomer.planNo || '',
+            paymentMethod: liveCustomer.direct_debit_method || liveCustomer.payment_method || '',
+            status: normalizedStatus,
             raw: liveCustomer,
           };
         }
       } catch (err: any) {
-        this.logger.warn(`Live getCustomer fallback for ${custNo}: ${err.message}`);
+        this.logger.warn(`Live getCustomer fallback for ${cleanCustNo}: ${err.message}`);
       }
     }
 
+    const user = await this.findUserDoc(cleanCustNo);
     return {
-      custNo,
+      custNo: cleanCustNo,
       name: user?.name || 'Jordan Miller',
       email: user?.email || 'jordan.miller@example.com',
       phone: user?.phone || '0491 570 006',
-      status: 'Active',
+      status: this.normalizeOctaneStatus(user?.legacyData?.status),
     };
   }
 
@@ -318,29 +444,67 @@ export class CarrierService {
     const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
 
     if (isLiveNumeric) {
+      let octaneResponded = false;
       try {
         const liveRes: any = await this.soapCall('/UtbServices', 'getServices', { custNo: cleanCustNo });
-        const rawServices = liveRes?.return?.services ?? liveRes?.services;
-        const serviceList = Array.isArray(rawServices)
-          ? rawServices
-          : rawServices
-          ? [rawServices]
+        octaneResponded = true;
+        const detailsNode =
+          liveRes?.services?.serviceDetails ??
+          liveRes?.return?.services?.serviceDetails ??
+          liveRes?.return?.services ??
+          (liveRes?.services && !('serviceDetails' in liveRes.services) ? liveRes.services : null);
+
+        const serviceList = Array.isArray(detailsNode)
+          ? detailsNode
+          : detailsNode && typeof detailsNode === 'object'
+          ? [detailsNode]
           : [];
 
         if (serviceList.length > 0) {
           return {
-            services: serviceList.map((svc: any, idx: number) => ({
-              serviceId: svc.serviceId || svc.id || `SVC-${cleanCustNo}-${idx + 1}`,
-              serviceNumber: svc.serviceNumber || svc.msn || svc.number || '0491 570 006',
-              serviceType: svc.serviceType || 'Mobile eSIM 5G',
-              planName: svc.planName || svc.description || 'JM 65GB Auto',
-              status: svc.status || 'Active',
-              lineSeqNo: String(svc.lineSeqNo || idx + 1),
-            })),
+            source: 'octane-live',
+            services: serviceList.map((svc: any, idx: number) => {
+              const resolved = this.resolvePlanDetails(svc.planName, svc.planNo);
+              return {
+                serviceId: svc.serviceId || svc.id || `SVC-${cleanCustNo}-${svc.lineSeqNo || idx + 1}`,
+                serviceNumber: svc.csn || svc.serviceNumber || svc.msn || svc.number || '',
+                serviceType:
+                  svc.productType === 'MO'
+                    ? 'Mobile 5G/4G'
+                    : svc.serviceType || 'Mobile Service',
+                planName: resolved?.name || svc.planName || 'Active Service',
+                planNo: String(svc.planNo || resolved?.planNo || ''),
+                planPrice: resolved?.price ?? null,
+                status: svc.status || 'Active',
+                lineSeqNo: String(svc.lineSeqNo || idx + 1),
+              };
+            }),
           };
         }
       } catch (err: any) {
         this.logger.warn(`Live getServices fallback for ${cleanCustNo}: ${err.message}`);
+      }
+
+      if (octaneResponded) {
+        // Octane confirmed zero active services — surface only in-flight local port/pending orders if any
+        const ordersCol = this.db.getCollection<OrderRecord>('orders');
+        const pendingOrders = await ordersCol
+          .find({ custNo: cleanCustNo, status: { $in: ['PENDING', 'PORT_IN_PROGRESS', 'PROCESSING'] as any } })
+          .sort({ updatedAt: -1 })
+          .toArray();
+        return {
+          source: 'octane-live',
+          services: pendingOrders.map((ord, idx) => ({
+            serviceId: `SVC-${ord.orderId}`,
+            serviceNumber: ord.msn || '',
+            serviceType: ord.isEsim ? 'Mobile eSIM 5G' : 'Mobile 5G',
+            planName: ord.planName,
+            planNo: ord.planNo,
+            planPrice: ord.pricePerMonth,
+            status: ord.status,
+            lineSeqNo: String(idx + 1),
+          })),
+        };
       }
     }
 
@@ -354,26 +518,21 @@ export class CarrierService {
           serviceId: `SVC-${ord.orderId}`,
           serviceNumber: ord.msn || userDoc?.phone || '0491 570 006',
           serviceType: ord.isEsim ? 'Mobile eSIM 5G' : 'Mobile 5G',
-          planName: ord.planName
-            || (userDoc?.legacyData?.plan
-              ? `${userDoc.legacyData.plan} Mobile 5G (${userDoc.legacyData.dataLimitGb || 5}GB)`
-              : 'JM 65GB Auto'),
+          planName: ord.planName || 'JM 65GB Auto',
           status: ord.status,
           lineSeqNo: String(idx + 1),
         })),
       };
     }
 
-    if (userDoc?.legacyData?.plan || cleanCustNo === 'CUST990001') {
+    if (cleanCustNo === 'CUST990001') {
       return {
         services: [
           {
-            serviceId: `SVC-JM-${cleanCustNo.replace(/\D/g, '') || '990001'}`,
+            serviceId: 'SVC-JM-990001',
             serviceNumber: userDoc?.phone || '0491 570 006',
             serviceType: 'Mobile eSIM 5G',
-            planName: userDoc?.legacyData?.plan
-              ? `${userDoc.legacyData.plan} Mobile 5G (${userDoc.legacyData.dataLimitGb || 5}GB)`
-              : 'JM 65GB Auto',
+            planName: 'JM 65GB Auto',
             status: 'Active',
             lineSeqNo: '1',
           },
@@ -528,7 +687,7 @@ export class CarrierService {
               isQRcode: true,
               cycleNo: '28',
               spendCode: '80610',
-              notificationEmail: dto.email || 'customer@justmobile.com.au',
+              notificationEmail: dto.email || 'info@justmobile.ai',
               orderItemAddress: {
                 locality: dto.suburb || 'Sydney',
                 postcode: dto.postcode || '2000',
@@ -671,7 +830,7 @@ export class CarrierService {
               isQRcode: true,
               cycleNo: '28',
               spendCode: '80610',
-              notificationEmail: dto.email || 'customer@justmobile.com.au',
+              notificationEmail: dto.email || 'info@justmobile.ai',
               ...(dto.numType === 'prepaid' ? { dob: dto.dob } : { arn: dto.arn }),
               orderItemAddress: {
                 locality: dto.suburb || 'Sydney',
@@ -834,7 +993,7 @@ export class CarrierService {
                 isQRcode: true,
                 cycleNo: '28',
                 spendCode: '80610',
-                notificationEmail: order.email || 'customer@justmobile.com.au',
+                notificationEmail: order.email || 'info@justmobile.ai',
                 ...(effectiveNumType === 'prepaid' ? { dob: effectiveDob } : { arn: effectiveArn }),
               },
             },
@@ -1274,7 +1433,7 @@ export class CarrierService {
       'plan-100gb': '11144168',
       'plan-120gb': '11144169',
       'plan-150gb': '11144170',
-      'plan-180gb': '11144171',
+      'plan-180gb': '11156014',
     };
     const targetPlanNo = (dto.planId && PLAN_ID_TO_NO[dto.planId]) || '11144157';
 
@@ -1362,46 +1521,121 @@ export class CarrierService {
    */
   async getUnbilledUsage(custNo: string) {
     const cleanCustNo = (custNo || '').trim();
-    const ordersCol = this.db.getCollection<OrderRecord>('orders');
-    const [latestOrder, userDoc] = await Promise.all([
-      ordersCol.findOne({ custNo: cleanCustNo }, { sort: { updatedAt: -1 } }),
-      this.findUserDoc(cleanCustNo),
-    ]);
-
-    let liveDataUsedGb: number | null = null;
     const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
 
     if (isLiveNumeric) {
-      try {
-        const numericCustNo = parseInt(cleanCustNo, 10);
-        const liveSummary: any = await this.soapCall('/UtbCall', 'getUnbilledCallsSummary', {
-          custNo: numericCustNo,
-        });
-        const summary = liveSummary?.return?.unbilledCallsSummary ?? liveSummary?.unbilledCallsSummary;
-        if (summary && typeof summary === 'object') {
-          const mbUsed = parseFloat(summary.dataUsedMb ?? summary.totalDataMb ?? summary.mbUsed);
-          const gbUsed = parseFloat(summary.dataUsedGb ?? summary.totalDataGb ?? summary.gbUsed);
-          if (!isNaN(gbUsed)) {
-            liveDataUsedGb = Number(gbUsed.toFixed(1));
-          } else if (!isNaN(mbUsed)) {
-            liveDataUsedGb = Number((mbUsed / 1024).toFixed(1));
-          }
-        }
-      } catch (err: any) {
-        this.logger.warn(`Live unbilled usage fallback for ${cleanCustNo}: ${err.message}`);
+      const numericCustNo = parseInt(cleanCustNo, 10);
+      const [svcRes, catRes, remDataRes, remVoiceRes] = await Promise.allSettled([
+        this.getServices(cleanCustNo),
+        this.soapCall('/UtbCall', 'getUnbilledCallsSummaryCategorize', { custNo: numericCustNo }),
+        this.soapCall('/UtbCall', 'getMobileCallRemainingData', { custNo: numericCustNo }),
+        this.soapCall('/UtbCall', 'getMobileCallRemaining', { custNo: numericCustNo }),
+      ]);
+
+      const services = svcRes.status === 'fulfilled' ? svcRes.value.services || [] : [];
+      if (services.length === 0) {
+        return {
+          custNo: cleanCustNo,
+          source: 'octane-live',
+          hasActivePlan: false,
+          billingCycle: 'No active plan',
+          cycleDetails: null,
+          dataMeter: null,
+          voiceAndSms: null,
+        };
       }
+
+      const primarySvc: any = services[0];
+      const catCall =
+        catRes.status === 'fulfilled'
+          ? (Array.isArray(catRes.value?.unbilledCallsSummaryCategorize?.calls)
+              ? catRes.value.unbilledCallsSummaryCategorize.calls[0]
+              : catRes.value?.unbilledCallsSummaryCategorize?.calls) || null
+          : null;
+      const remData =
+        remDataRes.status === 'fulfilled'
+          ? (Array.isArray(remDataRes.value?.mobileCallRemainingData?.calls)
+              ? remDataRes.value.mobileCallRemainingData.calls[0]
+              : remDataRes.value?.mobileCallRemainingData?.calls) || null
+          : null;
+      const remVoice =
+        remVoiceRes.status === 'fulfilled'
+          ? (Array.isArray(remVoiceRes.value?.mobileCallRemaining?.calls)
+              ? remVoiceRes.value.mobileCallRemaining.calls[0]
+              : remVoiceRes.value?.mobileCallRemaining?.calls) || null
+          : null;
+
+      const resolvedPlan = this.resolvePlanDetails(
+        catCall?.planName || remData?.planName || primarySvc.planName,
+        remData?.planNo || primarySvc.planNo,
+      );
+      const planMatch = (catCall?.planName || primarySvc.planName || '').match(/(\d+)\s*GB/i);
+      const planTotalGb = resolvedPlan?.dataGb || (planMatch ? parseInt(planMatch[1], 10) : 0);
+
+      // Parse live data used from Octane ('0', '1.4 GB', '512 MB', etc.)
+      let dataUsedGb = 0;
+      const rawDataStr = String(
+        catCall?.download && catCall.download !== '0 GB'
+          ? catCall.download
+          : catCall?.dataUsed ?? remData?.dataUsed ?? '0',
+      ).trim();
+      const mbMatch = rawDataStr.match(/([\d.]+)\s*MB/i);
+      const gbMatch = rawDataStr.match(/([\d.]+)/);
+      if (mbMatch) {
+        dataUsedGb = Number((parseFloat(mbMatch[1]) / 1024).toFixed(2));
+      } else if (gbMatch) {
+        dataUsedGb = Number(parseFloat(gbMatch[1]).toFixed(2));
+      }
+
+      const cycle = this.getCurrentBillingCycleDates();
+      let periodEnd = cycle.periodEnd;
+      let daysRemaining = cycle.daysRemaining;
+      if (catCall?.dataCountResetDate) {
+        const resetDate = new Date(catCall.dataCountResetDate);
+        if (!isNaN(resetDate.getTime())) {
+          periodEnd = resetDate.toISOString().split('T')[0];
+          daysRemaining = Math.max(0, Math.ceil((resetDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+        }
+      }
+
+      const dataRemainingGb = Number(Math.max(0, planTotalGb - dataUsedGb).toFixed(2));
+      const percentRemaining =
+        planTotalGb > 0 ? Number(((dataRemainingGb / planTotalGb) * 100).toFixed(1)) : 0;
+
+      return {
+        custNo: cleanCustNo,
+        source: 'octane-live',
+        hasActivePlan: true,
+        planName: resolvedPlan?.name || primarySvc.planName,
+        billingCycle: '28th of every month',
+        cycleDetails: {
+          periodStart: cycle.periodStart,
+          periodEnd,
+          daysRemaining,
+        },
+        dataMeter: {
+          planTotalGb,
+          dataUsedGb,
+          dataRemainingGb,
+          percentRemaining,
+          bankedDataGb: 0,
+          bankedMaxGb: 0,
+          autoRollover: false,
+        },
+        voiceAndSms: {
+          unlimitedStandardAuCalls: true,
+          unlimitedStandardAuSms: true,
+          minutesUsed: parseInt(catCall?.totalCalls || '0', 10) || 0,
+          smsSent: parseInt(remVoice?.smsCount || '0', 10) || 0,
+          unbilledChargeAud: parseFloat(catCall?.totalCharge || '0') || 0,
+        },
+      };
     }
 
+    // Demo fallback for non-numeric sandbox account (CUST990001)
+    const cycle = this.getCurrentBillingCycleDates();
     const isTestCustomer = cleanCustNo === 'CUST990001';
-    const hasAnyPlan = Boolean(
-      userDoc?.legacyData?.plan ||
-      userDoc?.legacyData?.dataLimitGb ||
-      latestOrder?.planName ||
-      isTestCustomer ||
-      liveDataUsedGb !== null,
-    );
-
-    if (!hasAnyPlan) {
+    if (!isTestCustomer) {
       return {
         custNo: cleanCustNo,
         hasActivePlan: false,
@@ -1412,47 +1646,23 @@ export class CarrierService {
       };
     }
 
-    const cycle = this.getCurrentBillingCycleDates();
-    let planTotalGb = 65;
-    let dataUsedGb = 7.6;
-    let periodEnd = cycle.periodEnd;
-    let daysRemaining = cycle.daysRemaining;
-
-    if (userDoc?.legacyData?.dataLimitGb) {
-      planTotalGb = userDoc.legacyData.dataLimitGb;
-      dataUsedGb = liveDataUsedGb ?? userDoc.legacyData.dataUsedGb ?? 0.8;
-      if (userDoc.legacyData.expiry) {
-        periodEnd = userDoc.legacyData.expiry;
-        const exp = new Date(periodEnd);
-        if (!isNaN(exp.getTime())) {
-          daysRemaining = Math.max(1, Math.ceil((exp.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
-        }
-      }
-    } else if (latestOrder?.planName) {
-      const match = latestOrder.planName.match(/(\d+)GB/i);
-      planTotalGb = match ? parseInt(match[1], 10) : (latestOrder.pricePerMonth === 20.54 ? 10 : 65);
-      dataUsedGb = liveDataUsedGb ?? Number((planTotalGb * 0.15).toFixed(1));
-    } else if (liveDataUsedGb !== null) {
-      dataUsedGb = liveDataUsedGb;
-    }
-
-    const dataRemainingGb = Number(Math.max(0, planTotalGb - dataUsedGb).toFixed(1));
-    const percentRemaining = Number(((dataRemainingGb / planTotalGb) * 100).toFixed(1));
-
+    const planTotalGb = 65;
+    const dataUsedGb = 7.6;
+    const dataRemainingGb = Number((planTotalGb - dataUsedGb).toFixed(1));
     return {
       custNo: cleanCustNo,
       hasActivePlan: true,
       billingCycle: '28th of every month',
       cycleDetails: {
         periodStart: cycle.periodStart,
-        periodEnd,
-        daysRemaining,
+        periodEnd: cycle.periodEnd,
+        daysRemaining: cycle.daysRemaining,
       },
       dataMeter: {
         planTotalGb,
         dataUsedGb,
         dataRemainingGb,
-        percentRemaining,
+        percentRemaining: Number(((dataRemainingGb / planTotalGb) * 100).toFixed(1)),
         bankedDataGb: 0,
         bankedMaxGb: 0,
         autoRollover: false,
@@ -1472,38 +1682,73 @@ export class CarrierService {
    */
   async getBalance(custNo: string) {
     const cleanCustNo = (custNo || '').trim();
-    const ordersCol = this.db.getCollection<OrderRecord>('orders');
-    const [latestOrder, userDoc] = await Promise.all([
-      ordersCol.findOne({ custNo: cleanCustNo }, { sort: { updatedAt: -1 } }),
-      this.findUserDoc(cleanCustNo),
-    ]);
-
-    let liveCurrBalance = 0.0;
     const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
 
     if (isLiveNumeric) {
-      try {
-        const liveRes: any = await this.soapCall('/UtbCustomer', 'getCurrBalance', {
-          customer: { custNo: cleanCustNo },
-        });
-        const parsed = parseFloat(liveRes?.return?.currBalance ?? liveRes?.currBalance ?? '0');
-        if (!isNaN(parsed)) {
-          liveCurrBalance = parsed;
-        }
-      } catch (err: any) {
-        this.logger.warn(`Live getCurrBalance fallback for ${cleanCustNo}: ${err.message}`);
+      const [balRes, svcRes, custRes] = await Promise.allSettled([
+        this.soapCall('/UtbCustomer', 'getCurrBalance', { customer: { custNo: cleanCustNo } }),
+        this.getServices(cleanCustNo),
+        this.getCustomer(cleanCustNo),
+      ]);
+
+      let liveCurrBalance = 0.0;
+      if (balRes.status === 'fulfilled') {
+        const parsed = parseFloat(balRes.value?.return?.currBalance ?? balRes.value?.currBalance ?? '0');
+        if (!isNaN(parsed)) liveCurrBalance = parsed;
       }
+
+      const services = svcRes.status === 'fulfilled' ? svcRes.value.services || [] : [];
+      const customerInfo: any = custRes.status === 'fulfilled' ? custRes.value : null;
+      const hasActivePlan = services.length > 0 && customerInfo?.status !== 'Disconnected';
+
+      if (!hasActivePlan) {
+        return {
+          custNo: cleanCustNo,
+          source: 'octane-live',
+          hasActivePlan: false,
+          currentBalance: liveCurrBalance,
+          formattedBalance: `$${liveCurrBalance.toFixed(2)}`,
+          lastInvoiceAmount: 0.0,
+          lastInvoiceDate: null,
+          nextInvoiceDate: null,
+          nextInvoiceAmount: 0.0,
+          autoPayStatus: 'Inactive',
+          paymentMethod: customerInfo?.paymentMethod || 'No payment method registered',
+        };
+      }
+
+      const primarySvc: any = services[0];
+      const resolved = this.resolvePlanDetails(primarySvc.planName, primarySvc.planNo);
+      const monthlyFee = resolved?.price ?? primarySvc.planPrice ?? 0;
+      const cycle = this.getCurrentBillingCycleDates();
+      const ddLabel =
+        customerInfo?.paymentMethod === 'CC' || customerInfo?.raw?.direct_debit_method === 'CC'
+          ? 'Direct Debit (Credit/Debit Card)'
+          : customerInfo?.paymentMethod || 'Direct Debit';
+
+      return {
+        custNo: cleanCustNo,
+        source: 'octane-live',
+        hasActivePlan: true,
+        planName: resolved?.name || primarySvc.planName,
+        currentBalance: liveCurrBalance,
+        formattedBalance: `$${liveCurrBalance.toFixed(2)}`,
+        lastInvoiceAmount: monthlyFee,
+        lastInvoiceDate: cycle.lastInvoiceDate,
+        nextInvoiceDate: cycle.nextInvoiceDate,
+        nextInvoiceAmount: monthlyFee,
+        autoPayStatus: customerInfo?.raw?.payment_method === 'DD' || customerInfo?.raw?.direct_debit_method ? 'Active' : 'Standard',
+        paymentMethod: ddLabel,
+      };
     }
 
     const isTestCustomer = cleanCustNo === 'CUST990001';
-    const hasAnyPlan = Boolean(userDoc?.legacyData?.plan || latestOrder?.planName || isTestCustomer);
-
-    if (!hasAnyPlan) {
+    if (!isTestCustomer) {
       return {
         custNo: cleanCustNo,
         hasActivePlan: false,
-        currentBalance: liveCurrBalance,
-        formattedBalance: `$${liveCurrBalance.toFixed(2)}`,
+        currentBalance: 0.0,
+        formattedBalance: '$0.00',
         lastInvoiceAmount: 0.0,
         lastInvoiceDate: null,
         nextInvoiceDate: null,
@@ -1514,22 +1759,17 @@ export class CarrierService {
     }
 
     const cycle = this.getCurrentBillingCycleDates();
-    const isStarter = userDoc?.legacyData?.plan === 'Starter';
-    const nextAmount = isStarter ? 20.54 : (latestOrder?.pricePerMonth || 37.55);
-    const lastAmount = isStarter ? 20.54 : (latestOrder?.pricePerMonth || 37.55);
-    const paymentMethod = `Visa Debit ending in ${cleanCustNo.replace(/\D/g, '').slice(-4) || '0481'}`;
-
     return {
       custNo: cleanCustNo,
       hasActivePlan: true,
-      currentBalance: liveCurrBalance,
-      formattedBalance: `$${liveCurrBalance.toFixed(2)}`,
-      lastInvoiceAmount: lastAmount,
+      currentBalance: 0.0,
+      formattedBalance: '$0.00',
+      lastInvoiceAmount: 37.55,
       lastInvoiceDate: cycle.lastInvoiceDate,
       nextInvoiceDate: cycle.nextInvoiceDate,
-      nextInvoiceAmount: nextAmount,
+      nextInvoiceAmount: 37.55,
       autoPayStatus: 'Active',
-      paymentMethod,
+      paymentMethod: 'Mastercard ending in 9001',
     };
   }
 }
