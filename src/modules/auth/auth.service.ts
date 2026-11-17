@@ -1230,6 +1230,21 @@ export class AuthService implements OnModuleInit {
     if (dto.commPreference !== undefined) updateSet.commPreference = dto.commPreference;
     if (dto.marketingConsent !== undefined) updateSet.marketingConsent = Boolean(dto.marketingConsent);
 
+    if (user.custNo) {
+      await this.carrierService.updateCustomerDetails(String(user.custNo), {
+        ...(updateSet.firstName !== undefined ? { firstName: updateSet.firstName } : {}),
+        ...(updateSet.surname !== undefined ? { surname: updateSet.surname } : {}),
+        ...(updateSet.email !== undefined ? { email: updateSet.email } : {}),
+        ...(updateSet.phone !== undefined ? { phone: updateSet.phone } : {}),
+        ...(updateSet.address !== undefined ? { address: updateSet.address } : {}),
+        ...(updateSet.suburb !== undefined ? { suburb: updateSet.suburb } : {}),
+        ...(updateSet.state !== undefined ? { state: updateSet.state } : {}),
+        ...(updateSet.postcode !== undefined ? { postcode: updateSet.postcode } : {}),
+        ...(updateSet.postalAddress !== undefined ? { postalAddress: updateSet.postalAddress } : {}),
+        ...(updateSet.commPreference !== undefined ? { commPreference: updateSet.commPreference } : {}),
+      });
+    }
+
     const usersCol = this.db.getCollection<UserDocument>('users');
     await usersCol.updateOne({ _id: user._id }, { $set: updateSet });
     const updatedUser = await usersCol.findOne({ _id: user._id });

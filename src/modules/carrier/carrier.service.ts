@@ -417,6 +417,87 @@ export class CarrierService {
     }
   }
 
+  /**
+   * Update Customer Details / Address in Octane (/UtbCustomer updateCustomer) atomically
+   */
+  async updateCustomerDetails(
+    custNo: string,
+    fields: {
+      firstName?: string;
+      surname?: string;
+      email?: string;
+      phone?: string;
+      address?: string;
+      suburb?: string;
+      state?: string;
+      postcode?: string;
+      postalAddress?: string;
+      commPreference?: string;
+      dob?: string;
+    },
+  ): Promise<{ syncedWithOctane: boolean }> {
+    const cleanCustNo = String(custNo || '').trim();
+    const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
+    if (!isLiveNumeric) {
+      return { syncedWithOctane: false };
+    }
+
+    const [liveCustRes, userDoc] = await Promise.allSettled([
+      this.getCustomer(cleanCustNo),
+      this.findUserDoc(cleanCustNo),
+    ]);
+    const liveCust: any = liveCustRes.status === 'fulfilled' ? liveCustRes.value : null;
+    const localUser: any = userDoc.status === 'fulfilled' ? userDoc.value : null;
+
+    const effectiveDob = fields.dob || liveCust?.dob || localUser?.dob || '';
+    const payload: Record<string, any> = {
+      custNo: cleanCustNo,
+      ...(effectiveDob ? { dob: effectiveDob } : {}),
+    };
+
+    if (fields.firstName !== undefined) payload.firstName = fields.firstName;
+    if (fields.surname !== undefined) payload.surname = fields.surname;
+    if (fields.firstName !== undefined || fields.surname !== undefined) {
+      const fn = fields.firstName ?? liveCust?.firstName ?? localUser?.firstName ?? '';
+      const sn = fields.surname ?? liveCust?.surname ?? localUser?.surname ?? '';
+      const combined = `${fn} ${sn}`.trim();
+      if (combined) payload.company = combined;
+    }
+    if (fields.email !== undefined) {
+      payload.email = fields.email;
+      payload.orderNotificationEmail = fields.email;
+      payload.authEmail = fields.email;
+    }
+    if (fields.phone !== undefined) {
+      payload.phone = fields.phone;
+      payload.mobile = fields.phone;
+    }
+    if (fields.address !== undefined) payload.address = fields.address;
+    if (fields.suburb !== undefined) payload.suburb = fields.suburb;
+    if (fields.state !== undefined) payload.state = fields.state;
+    if (fields.postcode !== undefined) payload.postcode = fields.postcode;
+    if (fields.postalAddress !== undefined) payload.address2 = fields.postalAddress;
+    if (fields.commPreference !== undefined) {
+      payload.preferredContactMethod = fields.commPreference === 'sms' ? 'SMS' : 'Email';
+    }
+
+    // Skip remote call if nothing mapped for Octane changed
+    if (Object.keys(payload).filter((k) => k !== 'custNo' && k !== 'dob').length === 0) {
+      return { syncedWithOctane: false };
+    }
+
+    try {
+      const res: any = await this.soapCall('/UtbCustomer', 'updateCustomer', { customer: payload });
+      this.assertOctaneSoapSuccess('updateCustomer', res);
+      this.cachedOctaneCustomers = null;
+      return { syncedWithOctane: true };
+    } catch (err: any) {
+      this.logger.error(`Live updateCustomer failed for ${cleanCustNo}: ${err.message}`);
+      if (err instanceof HttpException) throw err;
+      throw new BadRequestException(this.formatFriendlyCarrierError('updateCustomer', err.message));
+    }
+  }
+
   private async findUserDoc(custNo: string): Promise<any> {
     const usersCol = this.db.getCollection('users');
     const clean = (custNo || '').trim();
@@ -2030,6 +2111,7 @@ export class CarrierService {
     msn?: string;
   }): Promise<{
     success: boolean;
+    carrierOrderId?: string;
     custNo: string;
     planName: string;
     monthlyFee: number;
@@ -2146,6 +2228,7 @@ export class CarrierService {
 
     return {
       success: true,
+      ...(carrierOrderId ? { carrierOrderId } : {}),
       custNo: cleanCustNo,
       planName: dto.planName,
       monthlyFee: dto.monthlyFee,
@@ -2153,6 +2236,40 @@ export class CarrierService {
       effectiveDate: 'Next billing cycle (28th) with immediate quota allocation',
       message: `Plan successfully switched to ${dto.planName}. Your quota has been updated immediately.`,
     };
+  }
+
+  /**
+   * Cancel a pending Octane order (/UtbOrder orderCancel)
+   */
+  async cancelOrder(custNo: string, orderId?: string | null, detail?: string): Promise<{ cancelledWithOctane: boolean }> {
+    const cleanCustNo = String(custNo || '').trim();
+    const cleanOrderId = String(orderId || '').trim();
+    const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
+
+    if (!isLiveNumeric) {
+      return { cancelledWithOctane: false };
+    }
+
+    if (!/^\d+$/.test(cleanOrderId)) {
+      throw new BadRequestException(
+        'This order has no cancellable carrier reference or is already being processed. Please contact 1300 492 002 or info@justmobile.ai for help.',
+      );
+    }
+
+    try {
+      const res: any = await this.soapCall('/UtbOrder', 'orderCancel', {
+        request: {
+          orderId: Number(cleanOrderId),
+          detail: detail || 'Customer requested order cancellation',
+        },
+      });
+      this.assertOctaneSoapSuccess('orderCancel', res);
+      return { cancelledWithOctane: true };
+    } catch (err: any) {
+      this.logger.error(`Live orderCancel failed for order ${cleanOrderId} (custNo=${cleanCustNo}): ${err.message}`);
+      if (err instanceof HttpException) throw err;
+      throw new BadRequestException(this.formatFriendlyCarrierError('orderCancel', err.message));
+    }
   }
 
   /**

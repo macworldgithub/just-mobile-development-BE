@@ -377,25 +377,6 @@ export class ChatService {
       {
         type: 'function',
         function: {
-          name: 'manage_roaming',
-          description:
-            'Activate or disable International Roaming Travel Pack ($5/day 2GB across 20 eligible destinations). Requires OTP verification and confirmed: true.',
-          parameters: {
-            type: 'object',
-            properties: {
-              custNo: { type: 'string' },
-              action: { type: 'string', enum: ['activate', 'disable'] },
-              destinationCountry: { type: 'string' },
-              msn: { type: 'string' },
-              confirmed: { type: 'boolean' },
-            },
-            required: ['custNo', 'action', 'confirmed'],
-          },
-        },
-      },
-      {
-        type: 'function',
-        function: {
           name: 'resend_esim_qr',
           description:
             'Resend an eSIM activation QR code email OR issue a brand-new replacement eSIM QR code (set replaceProfile: true when the customer accidentally deleted/removed their eSIM or switched phones) after OTP verification.',
@@ -416,61 +397,6 @@ export class ChatService {
               },
             },
             required: ['custNo'],
-          },
-        },
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'suspend_service',
-          description:
-            'Temporarily suspend a verified customer mobile service (e.g. lost/stolen phone or voluntary suspension) after explicit confirmation.',
-          parameters: {
-            type: 'object',
-            properties: {
-              custNo: { type: 'string' },
-              msn: { type: 'string' },
-              reason: { type: 'string' },
-              confirmed: { type: 'boolean' },
-            },
-            required: ['custNo', 'reason', 'confirmed'],
-          },
-        },
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'restore_service',
-          description:
-            'Restore a temporarily suspended mobile service after OTP verification and explicit confirmation.',
-          parameters: {
-            type: 'object',
-            properties: {
-              custNo: { type: 'string' },
-              msn: { type: 'string' },
-              confirmed: { type: 'boolean' },
-            },
-            required: ['custNo', 'confirmed'],
-          },
-        },
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'manage_cancellation',
-          description:
-            'Schedule or withdraw a service cancellation (single service on account), warning never to cancel before porting finishes. Requires OTP verification and confirmed: true.',
-          parameters: {
-            type: 'object',
-            properties: {
-              custNo: { type: 'string' },
-              action: { type: 'string', enum: ['schedule', 'withdraw'] },
-              msn: { type: 'string' },
-              effectiveDate: { type: 'string' },
-              reason: { type: 'string' },
-              confirmed: { type: 'boolean' },
-            },
-            required: ['custNo', 'action', 'confirmed'],
           },
         },
       },
@@ -761,10 +687,15 @@ export class ChatService {
         if (!rec || String(rec.code) !== String(args.code || '').trim()) {
           return JSON.stringify({ success: false, error: 'Invalid or expired contact verification code.' });
         }
-        await this.db.getCollection('email_verifications').updateOne({ _id: rec._id }, { $set: { used: true } });
         const updateSet: Record<string, any> = { updatedAt: new Date() };
         if (args.newEmail || rec.newEmail) updateSet.email = String(args.newEmail || rec.newEmail).trim().toLowerCase();
         if (args.newPhone || rec.newPhone) updateSet.phone = String(args.newPhone || rec.newPhone).trim();
+
+        await this.carrierService.updateCustomerDetails(custNo, {
+          ...(updateSet.email !== undefined ? { email: updateSet.email } : {}),
+          ...(updateSet.phone !== undefined ? { phone: updateSet.phone } : {}),
+        });
+        await this.db.getCollection('email_verifications').updateOne({ _id: rec._id }, { $set: { used: true } });
         await this.db.getCollection('users').updateOne({ custNo }, { $set: updateSet });
         return JSON.stringify({
           success: true,
@@ -792,6 +723,15 @@ export class ChatService {
         if (args.commPreference !== undefined) updateSet.commPreference = args.commPreference;
         if (args.billDeliveryPreference !== undefined) updateSet.billDeliveryPreference = args.billDeliveryPreference;
         if (args.marketingConsent !== undefined) updateSet.marketingConsent = Boolean(args.marketingConsent);
+
+        await this.carrierService.updateCustomerDetails(custNo, {
+          ...(updateSet.address !== undefined ? { address: updateSet.address } : {}),
+          ...(updateSet.suburb !== undefined ? { suburb: updateSet.suburb } : {}),
+          ...(updateSet.state !== undefined ? { state: updateSet.state } : {}),
+          ...(updateSet.postcode !== undefined ? { postcode: updateSet.postcode } : {}),
+          ...(updateSet.postalAddress !== undefined ? { postalAddress: updateSet.postalAddress } : {}),
+          ...(updateSet.commPreference !== undefined ? { commPreference: updateSet.commPreference } : {}),
+        });
 
         const usersCol = this.db.getCollection('users');
         await usersCol.updateOne({ custNo }, { $set: updateSet });
@@ -841,6 +781,7 @@ export class ChatService {
         const user = await this.findCustomerByIdentifier(custNo);
         await this.db.getCollection('plan_changes').insertOne({
           referenceNumber,
+          carrierOrderId: res.carrierOrderId || null,
           custNo,
           msn: args.msn || user?.phone || null,
           planId: target.id,
@@ -884,6 +825,11 @@ export class ChatService {
             message: 'No pending plan change found to cancel; your current plan remains unchanged.',
           });
         }
+        await this.carrierService.cancelOrder(
+          custNo,
+          pending.carrierOrderId,
+          `Customer cancelled pending plan change ${pending.referenceNumber}`,
+        );
         await this.db.getCollection('plan_changes').updateOne(
           { _id: pending._id },
           { $set: { status: 'CANCELLED', cancelledAt: new Date() } },
@@ -891,7 +837,7 @@ export class ChatService {
         return JSON.stringify({
           cancelled: true,
           referenceNumber: pending.referenceNumber,
-          message: `Pending plan change (${pending.planName}) cancelled. Your original plan remains active.`,
+          message: `Pending plan change (${pending.planName}) cancelled with the carrier. Your original plan remains active.`,
         });
       }
 
@@ -923,40 +869,6 @@ export class ChatService {
           pdfDownloadPath: `/api/carrier/customers/${custNo}/invoices/${target.invoiceId}/pdf`,
           portalPath: '/account',
           emailed,
-        });
-      }
-
-      if (name === 'manage_roaming') {
-        const custNo = String(args.custNo || '').trim();
-        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
-          return JSON.stringify({ success: false, error: 'OTP verification required first.' });
-        }
-        if (!args.confirmed) {
-          return JSON.stringify({
-            success: false,
-            error: 'Present Travel Pack charges ($5/day for 2GB across 20 eligible destinations) and ask for explicit confirmation first.',
-          });
-        }
-        const ref = `RMG-JM-${Math.floor(100000 + Math.random() * 900000)}`;
-        await this.db.getCollection('service_addons').insertOne({
-          referenceNumber: ref,
-          custNo,
-          msn: args.msn || null,
-          addonType: 'ROAMING_TRAVEL_PACK',
-          action: args.action,
-          destinationCountry: args.destinationCountry || null,
-          priceAud: args.action === 'activate' ? 5.0 : 0,
-          status: args.action === 'activate' ? 'ACTIVE' : 'DISABLED',
-          createdAt: new Date(),
-        });
-        return JSON.stringify({
-          success: true,
-          referenceNumber: ref,
-          status: args.action === 'activate' ? 'ENABLED' : 'DISABLED',
-          message:
-            args.action === 'activate'
-              ? 'International Roaming Travel Pack ($5/day for 2GB) enabled.'
-              : 'International roaming disabled cleanly.',
         });
       }
 
@@ -1023,113 +935,6 @@ export class ChatService {
           smdpAddress: qr?.smdpAddress,
           emailDispatched: Boolean(emailRes?.success),
           maskedEmail: this.maskEmail(user?.email || ''),
-        });
-      }
-
-      if (name === 'suspend_service') {
-        const custNo = String(args.custNo || '').trim();
-        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
-          return JSON.stringify({ success: false, error: 'OTP verification required before suspending a service.' });
-        }
-        if (!args.confirmed) {
-          return JSON.stringify({
-            success: false,
-            error: 'Customer confirmation required before suspending service.',
-          });
-        }
-
-        const ordersCol = this.db.getCollection('orders');
-        const filter: Record<string, any> = { custNo };
-        if (args.msn) filter.msn = String(args.msn).replace(/\s+/g, '');
-        await ordersCol.updateMany(filter, {
-          $set: { status: 'SUSPENDED', suspensionReason: args.reason || 'Customer request', updatedAt: new Date() },
-        });
-        const referenceNumber = `SUS-JM-${Math.floor(100000 + Math.random() * 900000)}`;
-        return JSON.stringify({
-          success: true,
-          referenceNumber,
-          note: 'Service suspended. Outgoing calls, SMS, and mobile data are paused (000/112 emergency calls remain accessible).',
-        });
-      }
-
-      if (name === 'restore_service') {
-        const custNo = String(args.custNo || '').trim();
-        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
-          return JSON.stringify({ success: false, error: 'OTP verification required before restoring a service.' });
-        }
-        if (!args.confirmed) {
-          return JSON.stringify({
-            success: false,
-            error: 'Confirm with the customer before restoring their suspended service.',
-          });
-        }
-        const ordersCol = this.db.getCollection('orders');
-        const filter: Record<string, any> = { custNo, status: 'SUSPENDED' };
-        if (args.msn) filter.msn = String(args.msn).replace(/\s+/g, '');
-        await ordersCol.updateMany(filter, {
-          $set: { status: 'ACTIVE', restoredAt: new Date(), updatedAt: new Date() },
-        });
-        const referenceNumber = `RST-JM-${Math.floor(100000 + Math.random() * 900000)}`;
-        return JSON.stringify({
-          success: true,
-          referenceNumber,
-          note: 'Suspended mobile service restored to Active status.',
-        });
-      }
-
-      if (name === 'manage_cancellation') {
-        const custNo = String(args.custNo || '').trim();
-        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
-          return JSON.stringify({ success: false, error: 'OTP verification required before cancelling a service.' });
-        }
-        if (!args.confirmed) {
-          return JSON.stringify({
-            success: false,
-            error: 'Warn customer about number loss if porting, explain final billing, and ask for explicit confirmation first.',
-          });
-        }
-        const ordersCol = this.db.getCollection('orders');
-        const filter: Record<string, any> = { custNo };
-        if (args.msn) filter.msn = String(args.msn).replace(/\s+/g, '');
-
-        const referenceNumber = `CAN-JM-${Math.floor(100000 + Math.random() * 900000)}`;
-        if (args.action === 'schedule') {
-          await ordersCol.updateMany(filter, {
-            $set: {
-              cancellationStatus: 'SCHEDULED',
-              cancellationEffectiveDate: args.effectiveDate || 'End of current billing period',
-              cancellationReference: referenceNumber,
-              updatedAt: new Date(),
-            },
-          });
-        } else {
-          await ordersCol.updateMany(filter, {
-            $set: {
-              cancellationStatus: 'WITHDRAWN',
-              status: 'ACTIVE',
-              updatedAt: new Date(),
-            },
-          });
-        }
-
-        const user = await this.findCustomerByIdentifier(custNo);
-        if (user?.email) {
-          await this.mailService.sendCustomerNotificationEmail(
-            user.email,
-            `JustMobile Service Cancellation ${args.action === 'schedule' ? 'Scheduled' : 'Withdrawn'} (${referenceNumber})`,
-            `Reference: ${referenceNumber}\nAction: ${args.action === 'schedule' ? `Scheduled cancellation (${args.effectiveDate || 'End of billing period'})` : 'Cancellation withdrawn — service remains active'}\nTarget Service: ${args.msn || 'Selected mobile service'}`,
-          );
-        }
-
-        return JSON.stringify({
-          success: true,
-          referenceNumber,
-          action: args.action,
-          effectiveDate: args.effectiveDate || 'End of current paid billing period',
-          note:
-            args.action === 'schedule'
-              ? 'Cancellation request recorded for the specified service only; final bill settles on your next cycle.'
-              : 'Scheduled cancellation withdrawn cleanly; your service remains active.',
         });
       }
 
