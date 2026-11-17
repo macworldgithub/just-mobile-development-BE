@@ -67,7 +67,7 @@ export class CarrierController {
       twoFactorCode?: string;
     },
   ) {
-    await this.authService.verifyActionTwoFactorForHeader(authHeader, body.twoFactorCode || '');
+    await this.authService.verifyActionTwoFactorForHeader(authHeader, body.twoFactorCode || '', custNo);
     return this.carrierService.changePlan(custNo, body);
   }
 
@@ -207,6 +207,23 @@ export class CarrierController {
     @Body() body?: { email?: string },
   ) {
     return this.carrierService.sendOrderEsimEmail(custNo, orderId, body?.email);
+  }
+
+  @Post('customers/:custNo/esim/replace')
+  @HttpCode(HttpStatus.OK)
+  async replaceEsim(
+    @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader: string | undefined,
+    @Body()
+    body: {
+      msn?: string;
+      reason?: string;
+      email?: string;
+      twoFactorCode?: string;
+    },
+  ) {
+    await this.authService.verifyActionTwoFactorForHeader(authHeader, body?.twoFactorCode || '', custNo);
+    return this.carrierService.replaceEsimProfile(custNo, body);
   }
 
   // ==========================================================================

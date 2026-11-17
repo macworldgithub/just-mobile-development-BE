@@ -2,6 +2,7 @@ import {
   Injectable,
   BadRequestException,
   UnauthorizedException,
+  ForbiddenException,
   ConflictException,
   NotFoundException,
   Logger,
@@ -303,13 +304,10 @@ export class AuthService implements OnModuleInit {
       throw new BadRequestException('Invalid or expired verification code. Please request a new one.');
     }
 
-    // Mark code as used
-    await verificationsCol.updateOne({ _id: verification._id }, { $set: { used: true } });
-
     const passwordHash = await bcrypt.hash(password, 10);
 
     // ------------------------------------------------------------------
-    // Telco Carrier Customer Creation (Native CarrierService)
+    // Atomic Telco Carrier Customer Creation FIRST (fail-closed before DB writes)
     // ------------------------------------------------------------------
     const carrierRes = await this.carrierService.addCustomer({
       firstName,
@@ -326,6 +324,9 @@ export class AuthService implements OnModuleInit {
       abn: dto.abn,
     });
     const custNo = carrierRes.custNo;
+
+    // Persist user & mark OTP used ONLY after Octane succeeded
+    await verificationsCol.updateOne({ _id: verification._id }, { $set: { used: true } });
 
     const now = new Date();
     const newUser: UserDocument = {
@@ -1134,8 +1135,19 @@ export class AuthService implements OnModuleInit {
     }
   }
 
-  async verifyActionTwoFactorForHeader(authHeader: string | undefined, codeRaw: string) {
+  async verifyActionTwoFactorForHeader(
+    authHeader: string | undefined,
+    codeRaw: string,
+    expectedCustNo?: string,
+  ) {
     const user = await this.getAuthenticatedUser(authHeader);
+    if (
+      expectedCustNo &&
+      user.role !== 'admin' &&
+      String(user.custNo || '').trim() !== String(expectedCustNo).trim()
+    ) {
+      throw new ForbiddenException('You are not authorised to perform actions on another customer account.');
+    }
     await this.verifyActionTwoFactor(user, codeRaw);
     return user;
   }

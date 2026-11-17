@@ -47,7 +47,7 @@ export class InvoiceService {
           /Starter Mobile|Standard Mobile|SimplyBig/i.test(String(inv.planName || '')),
       );
 
-    if (existing.length > 0 && !hasOnlyStaleMockInvoices) {
+    if (!isLiveNumeric && existing.length > 0) {
       return existing;
     }
 
@@ -59,28 +59,77 @@ export class InvoiceService {
     let hasActivePlan = isTestCustomer;
 
     if (isLiveNumeric) {
-      const [custRes, svcRes] = await Promise.allSettled([
+      const groupNo = process.env.groupNo || '922';
+      const [custRes, svcRes, txRes] = await Promise.allSettled([
         this.carrierService.getCustomer(custNo),
         this.carrierService.getServices(custNo),
+        this.carrierService.restCall<any>(
+          `/api/v1/group/${groupNo}/customer/${custNo.trim()}/transaction/`,
+          undefined,
+          'GET',
+        ),
       ]);
-      const customerStatus = custRes.status === 'fulfilled' ? custRes.value?.status : 'Active';
+
+      const rawTxList =
+        txRes.status === 'fulfilled'
+          ? Array.isArray(txRes.value)
+            ? txRes.value
+            : Array.isArray(txRes.value?.transactions)
+              ? txRes.value.transactions
+              : Array.isArray(txRes.value?.content)
+                ? txRes.value.content
+                : []
+          : [];
+
       const services = svcRes.status === 'fulfilled' ? svcRes.value?.services || [] : [];
+      const primarySvc: any = services[0];
+      const resolved = primarySvc
+        ? this.carrierService.resolvePlanDetails(primarySvc.planName, primarySvc.planNo)
+        : null;
+      const planLabel = resolved?.name || primarySvc?.planName || 'JustMobile Service';
+      const dataGb = resolved?.dataGb || 65;
+      const networkTier = dataGb >= 65 ? '5G' : '4G';
+      const customerStatus = custRes.status === 'fulfilled' ? custRes.value?.status : 'Active';
+
+      // Map real Octane billing/payment transactions (never invent synthetic sample invoices for live customers)
+      if (rawTxList.length > 0) {
+        return rawTxList.map((tx: any, idx: number) => {
+          const amt = Math.abs(Number(tx.amount ?? tx.transactionAmount ?? resolved?.price ?? 0));
+          const gst = Number((amt / 11).toFixed(2));
+          const sub = Number((amt - gst).toFixed(2));
+          const txDate = String(tx.transactionDate || tx.createdDate || new Date().toISOString()).slice(0, 10);
+          return {
+            invoiceId: String(tx.stmtNo || tx.invoiceId || tx.transactionId || `TXN-${idx + 1}`),
+            custNo,
+            issueDate: txDate,
+            dueDate: txDate,
+            periodStart: txDate,
+            periodEnd: txDate,
+            planName: tx.description || tx.comment || `${planLabel} (Telstra Wholesale ${networkTier})`,
+            dataAllowance: `${dataGb} GB Monthly ${networkTier} Data`,
+            subtotal: sub,
+            gstAmount: gst,
+            amount: amt,
+            status: 'PAID' as const,
+            paymentMethod: String(tx.paymentMethod || tx.paymentProvider || 'Direct Debit / Card'),
+            transactionRef: String(tx.transactionId || tx.paymentReference || tx.stmtNo || `TXN-${custNo}-${idx + 1}`),
+          };
+        });
+      }
+
+      if (existing.length > 0 && !hasOnlyStaleMockInvoices) {
+        return existing;
+      }
+
       if (customerStatus === 'Disconnected' || services.length === 0) {
         return [];
       }
-      const primarySvc: any = services[0];
-      const resolved = this.carrierService.resolvePlanDetails(primarySvc.planName, primarySvc.planNo);
-      hasActivePlan = true;
-      activePlanName = resolved?.name || primarySvc.planName;
-      activeDataGb = resolved?.dataGb || 65;
-      amount = resolved?.price ?? primarySvc.planPrice ?? 37.55;
-    } else if (!isTestCustomer) {
-      const ordersCol = this.db.getCollection('orders');
-      const userOrders = await ordersCol.find({ custNo }).toArray();
-      if (userOrders.length === 0) return [];
-      hasActivePlan = true;
-      activePlanName = userOrders[0].planName || activePlanName;
-      amount = userOrders[0].pricePerMonth || amount;
+
+      return [];
+    }
+
+    if (!isTestCustomer) {
+      return [];
     }
 
     if (!hasActivePlan) {
@@ -92,9 +141,7 @@ export class InvoiceService {
     const networkTier = activeDataGb >= 65 ? '5G' : '4G';
     const planName = `${activePlanName} (Telstra Wholesale ${networkTier})`;
     const dataAllowance = `${activeDataGb} GB Monthly ${networkTier} Data`;
-    const paymentMethod = custNo === 'CUST990001'
-      ? 'Mastercard ending in 9001 (Auto-Pay)'
-      : `Direct Debit ending in ${custNo.slice(-4) || '0342'} (Auto-Pay)`;
+    const paymentMethod = 'Mastercard ending in 9001 (Auto-Pay)';
 
     // Default invoices matching billing cycle on 28th
     const sampleInvoices: InvoiceRecord[] = [

@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, HttpException, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { MailService } from '../mail/mail.service';
 import * as soap from 'soap';
@@ -52,11 +52,12 @@ export interface OrderRecord {
   planName: string;
   pricePerMonth: number;
   status: 'PENDING' | 'ACTIVE' | 'PORT_IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'REJECTED';
-  orderType: 'NEW_ACTIVATION' | 'PORT_IN' | 'PLAN_CHANGE';
-  orderAction: 'ADD_WME_NEW' | 'ADD_WME_PORT' | 'CHANGE_WME_PLAN';
+  orderType: 'NEW_ACTIVATION' | 'PORT_IN' | 'PLAN_CHANGE' | 'ESIM_REPLACEMENT';
+  orderAction: 'ADD_WME_NEW' | 'ADD_WME_PORT' | 'CHANGE_WME_PLAN' | 'CHANGE_WME_SIM';
   isEsim: boolean;
   isQRcode: boolean;
   lpaString?: string;
+  activationCode?: string;
   numType?: 'prepaid' | 'postpaid';
   dob?: string;
   arn?: string;
@@ -138,6 +139,8 @@ export class CarrierService {
     return this.soapClientCache.get(wsdlUrl)!;
   }
 
+  private static readonly CARRIER_TIMEOUT_MS = 25000;
+
   /**
    * Generic SOAP call to Telcoinabox / Octane or Benzine WSDL
    */
@@ -153,29 +156,156 @@ export class CarrierService {
     try {
       const client: any = await this.getSoapClient(wsdlUrl);
       return new Promise((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          this.logger.error(`SOAP timeout executing ${methodName} after ${CarrierService.CARRIER_TIMEOUT_MS}ms`);
+          reject(
+            new InternalServerErrorException(
+              'We are temporarily unable to reach our network provider. Please try again shortly.',
+            ),
+          );
+        }, CarrierService.CARRIER_TIMEOUT_MS);
+
         client[methodName](fullArgs, (err: any, result: any) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
           if (err) {
             this.logger.error(`SOAP error executing ${methodName}:`, err.message || err);
-            return reject(new InternalServerErrorException(err.message || 'Carrier SOAP call failed.'));
+            return reject(
+              new InternalServerErrorException(
+                'We are temporarily unable to reach our network provider. Please try again shortly.',
+              ),
+            );
           }
           this.logger.log(`SOAP ${methodName} executed successfully`);
           resolve(result as T);
         });
       });
     } catch (err: any) {
+      if (err instanceof HttpException) {
+        throw err;
+      }
       this.logger.error(`Failed to initialize SOAP client for ${wsdlUrl}:`, err.message);
-      throw new InternalServerErrorException(`WSDL connection failed: ${err.message}`);
+      throw new InternalServerErrorException(
+        'We are temporarily unable to reach our network provider. Please try again shortly.',
+      );
     }
+  }
+
+  /**
+   * Map raw Octane carrier error text to a clear, customer-friendly message while logging raw details server-side.
+   */
+  private formatFriendlyCarrierError(operation: string, rawDetail: string): string {
+    const lower = (rawDetail || '').toLowerCase();
+    if (/dob|birth|arn|account|transfer|port|mismatch/.test(lower)) {
+      return 'We could not validate your transfer details with the carrier. Please check your details and try again, or contact 1300 492 002.';
+    }
+    if (/sim|iccid|esim/.test(operation.toLowerCase()) || /change_wme_sim|esim/i.test(operation)) {
+      return 'We could not issue your replacement eSIM QR right now, and your existing service was not changed. Please try again shortly or contact 1300 492 002.';
+    }
+    if (/chg_plan|plan/i.test(operation)) {
+      return 'We could not complete your plan change with our network provider right now, so your current plan stays active. Please try again shortly.';
+    }
+    if (/otp/i.test(operation)) {
+      return 'We could not send or verify the SMS security code right now. Please try again in a moment.';
+    }
+    if (/addcustomer/i.test(operation)) {
+      return 'We could not set up your account with our network provider right now, so nothing was saved. Please check your details and try again.';
+    }
+    return 'We could not complete this request with our network provider right now, and no changes were saved. Please try again shortly or contact 1300 492 002.';
+  }
+
+  private isBenignOctaneMessage(msg: any): boolean {
+    const clean = String(msg || '').trim();
+    return clean === '' || /^(web method processed successfully|success|ok)$/i.test(clean);
+  }
+
+  private hasOctaneFailure(payload: any): { failed: boolean; detail: string } {
+    if (!payload || typeof payload !== 'object') {
+      return { failed: true, detail: 'Empty or invalid response from Octane' };
+    }
+    const errorCode = payload?.errorCode;
+    const hasNonZeroCode =
+      errorCode !== undefined &&
+      errorCode !== null &&
+      String(errorCode).trim() !== '' &&
+      String(errorCode).trim() !== '0';
+    const isSuccessTrue =
+      payload?.success === true ||
+      String(payload?.success || '').trim().toLowerCase() === 'true';
+    const isSuccessFalse =
+      payload?.success === false ||
+      String(payload?.success || '').trim().toLowerCase() === 'false';
+    const rawStatus = String(payload?.status || payload?.resultStatus || '').trim().toUpperCase();
+    const isFailedStatus = ['FAILED', 'FAILURE', 'ERROR', 'REJECTED'].includes(rawStatus);
+    const errText =
+      payload?.error?.message ||
+      (typeof payload?.error === 'string' ? payload.error : '') ||
+      payload?.errorMessage ||
+      '';
+    const hasErrorText =
+      String(errText).trim() !== '' &&
+      !(isSuccessTrue && !hasNonZeroCode && !isFailedStatus) &&
+      !( !hasNonZeroCode && !isFailedStatus && this.isBenignOctaneMessage(errText) );
+
+    if (hasNonZeroCode || isSuccessFalse || isFailedStatus || hasErrorText) {
+      const detail =
+        (String(errText).trim() || undefined) ||
+        (isSuccessFalse || isFailedStatus ? payload?.message || rawStatus : undefined) ||
+        (hasNonZeroCode ? `errorCode=${errorCode}` : 'Empty or invalid response from Octane');
+      return { failed: true, detail: String(detail) };
+    }
+    return { failed: false, detail: '' };
+  }
+
+  private isSyntheticLpa(lpa?: string | null): boolean {
+    return Boolean(lpa && /\$JM-(AU|REP)-/i.test(String(lpa)));
+  }
+
+  private parseActivationCodeString(
+    rawCode: string,
+    defaultSmdp = 'smdp.telcoinabox.com.au',
+  ): { smdpAddress: string; activationCode: string; lpaString: string } | null {
+    const clean = String(rawCode || '').trim();
+    if (!clean) return null;
+    const normalizedLpa = clean.startsWith('LPA:')
+      ? clean
+      : clean.startsWith('1$')
+        ? `LPA:${clean}`
+        : `LPA:1$${defaultSmdp}$${clean}`;
+    const parts = normalizedLpa.split('$');
+    const smdpAddress = parts[1] || defaultSmdp;
+    const activationCode = parts[2] || clean;
+    return { smdpAddress, activationCode, lpaString: normalizedLpa };
+  }
+
+  /**
+   * Validate an Octane SOAP response payload and reject any non-zero errorCode, errorMessage,
+   * string/boolean false success flag, or failed/rejected status string.
+   */
+  private assertOctaneSoapSuccess(operation: string, result: any): any {
+    const ret = result?.return ?? result;
+    const check = this.hasOctaneFailure(ret);
+    if (check.failed) {
+      this.logger.error(`Octane rejected ${operation}: ${check.detail}`);
+      throw new BadRequestException(this.formatFriendlyCarrierError(operation, check.detail));
+    }
+    return ret;
   }
 
   /**
    * Generic REST call to Telcoinabox / Octane API
    */
   async restCall<T = any>(path: string, body?: any, method: string = 'POST'): Promise<T> {
-    const url = `${this.baseUrl}${path}`;
+    const url = path.startsWith('http') ? path : `${this.baseUrl}${path}`;
     this.logger.log(`Carrier REST call → ${method} ${url}`);
 
     const authHeader = `Basic ${Buffer.from(`${this.userName}:${this.password}`).toString('base64')}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CarrierService.CARRIER_TIMEOUT_MS);
 
     try {
       const response = await fetch(url, {
@@ -184,19 +314,45 @@ export class CarrierService {
           'Content-Type': 'application/json',
           Authorization: authHeader,
         },
-        body: body ? JSON.stringify(body) : undefined,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
       });
 
       if (!response.ok) {
         const errorText = await response.text();
         this.logger.error(`Carrier REST error status ${response.status}: ${errorText}`);
-        throw new BadRequestException(`Carrier API responded with status ${response.status}`);
+        throw new BadRequestException(
+          'We could not complete that request with our network provider right now. Please try again shortly.',
+        );
       }
 
-      return (await response.json()) as T;
+      if (response.status === 204) {
+        return null as T;
+      }
+
+      const rawText = await response.text();
+      if (!rawText || !rawText.trim()) {
+        return null as T;
+      }
+
+      const data: any = JSON.parse(rawText);
+      const check = this.hasOctaneFailure(data);
+      if (check.failed) {
+        this.logger.error(`Carrier REST rejected request: ${check.detail}`);
+        throw new BadRequestException(this.formatFriendlyCarrierError(path, check.detail));
+      }
+
+      return data as T;
     } catch (err: any) {
-      this.logger.error(`REST request failed for ${url}:`, err.message);
-      throw new InternalServerErrorException(`Carrier REST request failed: ${err.message}`);
+      if (err instanceof HttpException) {
+        throw err;
+      }
+      this.logger.error(`REST request failed for ${url}:`, err?.name === 'AbortError' ? 'Timeout exceeded' : err.message);
+      throw new InternalServerErrorException(
+        'We are temporarily unable to reach our network provider. Please try again shortly.',
+      );
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -246,16 +402,18 @@ export class CarrierService {
         { customer: customerPayload },
       );
 
-      const custNo = result?.return?.custNo || result?.custNo;
+      const ret = this.assertOctaneSoapSuccess('addCustomer', result);
+      const custNo = ret?.custNo;
       if (!custNo) {
-        throw new BadRequestException('Carrier API did not return a customer number.');
+        throw new BadRequestException(this.formatFriendlyCarrierError('addCustomer', 'Missing custNo'));
       }
 
       this.logger.log(`✓ Live Octane Customer created with CustNo: ${custNo}`);
       return { custNo, isMock: false };
     } catch (err: any) {
+      if (err instanceof HttpException) throw err;
       this.logger.error(`Failed to create carrier customer: ${err.message}`);
-      throw new BadRequestException(`Carrier customer creation failed: ${err.message}`);
+      throw new BadRequestException(this.formatFriendlyCarrierError('addCustomer', err.message));
     }
   }
 
@@ -545,6 +703,68 @@ export class CarrierService {
     };
   }
 
+  private async fetchOctaneEsimActivation(params: {
+    custNo?: string | number;
+    msn?: string;
+    orderId?: string;
+    lineSeqNo?: number;
+  }): Promise<{ smdpAddress: string; activationCode: string; lpaString: string } | null> {
+    const cleanCust = params.custNo ? String(params.custNo).replace(/\D+/g, '') : '';
+    const cleanMsn = params.msn ? String(params.msn).replace(/\s+/g, '') : '';
+    const payload: Record<string, any> = {
+      requestType: 'QR Code',
+      lineseqno: params.lineSeqNo || 1,
+      ...(cleanCust ? { custno: Number(cleanCust) } : {}),
+      ...(cleanMsn ? { msn: cleanMsn } : {}),
+      ...(params.orderId && !/^(ORD|PORT|REP)-/i.test(String(params.orderId))
+        ? { orderId: String(params.orderId) }
+        : {}),
+    };
+    const qrRes = await this.restCall<any>('/api/v1/mobile/resource/getEsimDetails', payload);
+    const rawCode =
+      qrRes?.simDetails?.activationCode ||
+      qrRes?.esimDetails?.activationCode ||
+      qrRes?.activationCode ||
+      '';
+    return this.parseActivationCodeString(rawCode);
+  }
+
+  private async resolveLiveServiceLine(cleanCustNo: string, preferredMsn?: string): Promise<{
+    lineSeqNo: number;
+    msn: string;
+    status: string;
+    planNo?: string;
+  }> {
+    const svcRes = await this.getServices(cleanCustNo);
+    const services = Array.isArray(svcRes?.services) ? svcRes.services : [];
+    const targetMsn = (preferredMsn || '').replace(/\s+/g, '');
+    const matched: any =
+      (targetMsn
+        ? services.find((s: any) => String(s.serviceNumber || '').replace(/\s+/g, '') === targetMsn)
+        : null) || services[0];
+
+    if (!matched) {
+      throw new BadRequestException(
+        'No active mobile service was found on your network account yet. Please contact 1300 492 002 if your service was recently activated.',
+      );
+    }
+
+    const rawStatus = String(matched.status || '').trim().toUpperCase();
+    if (/BAR|DISC|SUSP|CANCEL/.test(rawStatus)) {
+      throw new BadRequestException(
+        `Your mobile service is currently ${matched.status} and cannot be modified right now. Please contact 1300 492 002 for assistance.`,
+      );
+    }
+
+    const lineSeqNo = parseInt(String(matched.lineSeqNo || '1'), 10);
+    return {
+      lineSeqNo: Number.isFinite(lineSeqNo) && lineSeqNo > 0 ? lineSeqNo : 1,
+      msn: String(matched.serviceNumber || targetMsn || '').replace(/\s+/g, ''),
+      status: String(matched.status || 'Active'),
+      planNo: matched.planNo ? String(matched.planNo) : undefined,
+    };
+  }
+
   // ==========================================================================
   // 2. NUMBER RESERVATION & SELECTION (/UtbPooledResource)
   // ==========================================================================
@@ -568,24 +788,37 @@ export class CarrierService {
           },
         );
 
-        const reserved = result?.return?.reservedPooledResources ?? [];
-        const numbers = reserved.map((item: any) => {
-          const raw = String(item.resourceValue || item.resource);
-          const formatted = raw.length === 10 ? `${raw.slice(0, 4)} ${raw.slice(4, 7)} ${raw.slice(7)}` : raw;
-          return {
-            id: item.reservationId || `RES-${raw}`,
-            number: raw,
-            formatted,
-          };
-        });
+        const ret = this.assertOctaneSoapSuccess('reserveResources', result);
+        const rawReserved = ret?.reservedPooledResources ?? [];
+        const reservedList = Array.isArray(rawReserved) ? rawReserved : rawReserved ? [rawReserved] : [];
+        const numbers = reservedList
+          .map((item: any) => {
+            const raw = String(item?.resourceValue || item?.resource || '').replace(/\s+/g, '');
+            if (!raw) return null;
+            const formatted = raw.length === 10 ? `${raw.slice(0, 4)} ${raw.slice(4, 7)} ${raw.slice(7)}` : raw;
+            return {
+              id: String(item.reservationId || `RES-${raw}`),
+              number: raw,
+              formatted,
+            };
+          })
+          .filter(Boolean) as { id: string; number: string; formatted: string }[];
+
+        if (numbers.length === 0) {
+          throw new BadRequestException(
+            'No new mobile numbers are currently available from the carrier pool. Please try again in a moment.',
+          );
+        }
 
         return { numbers };
       } catch (err: any) {
-        this.logger.warn(`Live number reservation fallback triggered: ${err.message}`);
+        this.logger.error(`Live number reservation failed: ${err.message}`);
+        if (err instanceof HttpException) throw err;
+        throw new BadRequestException(this.formatFriendlyCarrierError('reserveResources', err.message));
       }
     }
 
-    // Realistic Australian Telstra Wholesale pool numbers
+    // Sandbox-only numbers when TELCO_LIVE_CREATE !== 'true'
     const baseSuffix = Math.floor(100 + Math.random() * 800);
     const mockList = [
       `0488 912 ${baseSuffix}`,
@@ -627,13 +860,16 @@ export class CarrierService {
           'queryResources',
           { queryPooledResourcesRequest: { queryValue: clean } },
         );
+        const ret = this.assertOctaneSoapSuccess('queryResources', result);
         return {
-          available: Boolean(result?.return?.available),
+          available: Boolean(ret?.available),
           formatted,
           message: 'Carrier pool verification complete.',
         };
       } catch (err: any) {
-        this.logger.warn(`queryResources failed: ${err.message}`);
+        this.logger.error(`Live queryResources failed: ${err.message}`);
+        if (err instanceof HttpException) throw err;
+        throw new BadRequestException(this.formatFriendlyCarrierError('queryResources', err.message));
       }
     }
 
@@ -657,7 +893,8 @@ export class CarrierService {
     msn: string;
     status: string;
     isEsim: boolean;
-    lpaString: string;
+    lpaString: string | null;
+    carrierDispatchedEmail?: boolean;
     emailSent?: boolean;
     emailRecipient?: string;
   }> {
@@ -665,7 +902,7 @@ export class CarrierService {
     const planNo = dto.planNo || '11144157';
     const planName = dto.planName || 'JM 65GB Auto';
     const pricePerMonth = dto.pricePerMonth || 37.55;
-    const isLive = process.env.TELCO_LIVE_CREATE === 'true';
+    const isLive = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test((dto.custNo || '').trim());
 
     let orderId = `ORD-${Math.floor(100000 + Math.random() * 900000)}`;
 
@@ -684,7 +921,7 @@ export class CarrierService {
               agentId: '923',
               msn,
               isEsim: true,
-              isQRcode: true,
+              isQRCode: true,
               cycleNo: '28',
               spendCode: '80610',
               notificationEmail: dto.email || 'info@justmobile.ai',
@@ -701,19 +938,22 @@ export class CarrierService {
 
       try {
         const result: any = await this.soapCall('/UtbOrder', 'orderCreate', requestBody);
-        if (result?.return?.orderId) {
-          orderId = String(result.return.orderId);
+        const ret = this.assertOctaneSoapSuccess('ADD_WME_NEW', result);
+        if (!ret?.orderId) {
+          throw new BadRequestException(this.formatFriendlyCarrierError('ADD_WME_NEW', 'Missing orderId'));
         }
+        orderId = String(ret.orderId);
       } catch (err: any) {
         this.logger.error(`Live order creation failed: ${err.message}`);
-        throw new BadRequestException(`Carrier order creation failed: ${err.message}`);
+        if (err instanceof HttpException) throw err;
+        throw new BadRequestException(this.formatFriendlyCarrierError('ADD_WME_NEW', err.message));
       }
     }
 
-    const lpaString = `LPA:1$smdp.telcoinabox.com.au$JM-AU-${orderId}`;
+    const esimDetails = await this.resolveActivatedOrderEsim(isLive, dto.custNo, msn, orderId);
     const now = new Date();
 
-    // Persist in orders collection
+    // Persist in orders collection (never invent synthetic LPA strings on live accounts)
     const ordersCol = this.db.getCollection<OrderRecord>('orders');
     await ordersCol.updateOne(
       { orderId },
@@ -730,7 +970,8 @@ export class CarrierService {
           orderAction: 'ADD_WME_NEW',
           isEsim: true,
           isQRcode: true,
-          lpaString,
+          ...(esimDetails.lpaString ? { lpaString: esimDetails.lpaString } : {}),
+          ...(esimDetails.activationCode ? { activationCode: esimDetails.activationCode } : {}),
           address: dto.address,
           suburb: dto.suburb,
           state: dto.state,
@@ -743,42 +984,19 @@ export class CarrierService {
       { upsert: true },
     );
 
-    // Automated eSIM Welcome Email via Hostinger SMTP (INT-07)
-    let recipientEmail = dto.email;
-    try {
-      let recipientName: string | undefined = dto.firstName && dto.lastName ? `${dto.firstName} ${dto.lastName}` : dto.firstName;
-
-      if (!recipientEmail || !recipientEmail.includes('@') || !recipientName) {
-        const usersCol = this.db.getCollection('users');
-        const user = await usersCol.findOne({
-          $or: [{ custNo: dto.custNo }, { custNo: parseInt(dto.custNo.replace(/\D+/g, ''), 10) }],
-        });
-        if (user?.email && !recipientEmail) {
-          recipientEmail = user.email;
-        }
-        if (user?.name && !recipientName) {
-          recipientName = user.name;
-        }
-      }
-
-      if (recipientEmail && recipientEmail.includes('@')) {
-        this.mailService.sendEsimWelcomeEmail({
-          to: recipientEmail,
-          recipientName,
-          custNo: dto.custNo,
-          orderId,
-          msn,
-          planName,
-          pricePerMonth,
-          lpaString,
-          smdpAddress: 'smdp.telcoinabox.com.au',
-          activationCode: `JM-AU-${orderId}`,
-          isEsim: true,
-        }).catch((err) => this.logger.warn(`Background eSIM email send error: ${err.message}`));
-      }
-    } catch (e: any) {
-      this.logger.warn(`Could not dispatch automated eSIM welcome email: ${e.message}`);
-    }
+    const { recipientEmail, sent: emailSent } = await this.dispatchOrderWelcomeEmail({
+      custNo: dto.custNo,
+      orderId,
+      msn,
+      planName,
+      pricePerMonth,
+      email: dto.email,
+      firstName: dto.firstName,
+      lastName: dto.lastName,
+      lpaString: esimDetails.lpaString,
+      smdpAddress: esimDetails.smdpAddress,
+      activationCode: esimDetails.activationCode,
+    });
 
     return {
       success: true,
@@ -786,10 +1004,90 @@ export class CarrierService {
       msn,
       status: 'ACTIVE',
       isEsim: true,
-      lpaString,
-      emailSent: Boolean(recipientEmail),
+      lpaString: esimDetails.lpaString,
+      carrierDispatchedEmail: isLive && !esimDetails.lpaString,
+      emailSent: Boolean(emailSent || (isLive && recipientEmail)),
       emailRecipient: recipientEmail,
     };
+  }
+
+  private async resolveActivatedOrderEsim(
+    isLive: boolean,
+    custNo: string,
+    msn: string,
+    orderId: string,
+  ): Promise<{ lpaString: string | null; smdpAddress: string | null; activationCode: string | null }> {
+    if (isLive) {
+      const liveQr = await this.fetchOctaneEsimActivation({ custNo, msn, orderId }).catch(() => null);
+      if (liveQr) {
+        return liveQr;
+      }
+      return { lpaString: null, smdpAddress: null, activationCode: null };
+    }
+    const smdpAddress = 'smdp.telcoinabox.com.au';
+    const activationCode = `JM-AU-${orderId}`;
+    return {
+      lpaString: `LPA:1$${smdpAddress}$${activationCode}`,
+      smdpAddress,
+      activationCode,
+    };
+  }
+
+  private async dispatchOrderWelcomeEmail(params: {
+    custNo: string;
+    orderId: string;
+    msn: string;
+    planName: string;
+    pricePerMonth: number;
+    email?: string;
+    firstName?: string;
+    lastName?: string;
+    lpaString: string | null;
+    smdpAddress: string | null;
+    activationCode: string | null;
+  }): Promise<{ recipientEmail?: string; sent: boolean }> {
+    let recipientEmail = params.email;
+    try {
+      let recipientName: string | undefined =
+        params.firstName && params.lastName ? `${params.firstName} ${params.lastName}` : params.firstName;
+
+      if (!recipientEmail || !recipientEmail.includes('@') || !recipientName) {
+        const usersCol = this.db.getCollection('users');
+        const user = await usersCol.findOne({
+          $or: [{ custNo: params.custNo }, { custNo: parseInt(params.custNo.replace(/\D+/g, ''), 10) }],
+        });
+        if (user?.email && !recipientEmail) recipientEmail = user.email;
+        if (user?.name && !recipientName) recipientName = user.name;
+      }
+
+      if (
+        recipientEmail &&
+        recipientEmail.includes('@') &&
+        params.lpaString &&
+        params.smdpAddress &&
+        params.activationCode
+      ) {
+        this.mailService
+          .sendEsimWelcomeEmail({
+            to: recipientEmail,
+            recipientName,
+            custNo: params.custNo,
+            orderId: params.orderId,
+            msn: params.msn,
+            planName: params.planName,
+            pricePerMonth: params.pricePerMonth,
+            lpaString: params.lpaString,
+            smdpAddress: params.smdpAddress,
+            activationCode: params.activationCode,
+            isEsim: true,
+          })
+          .catch((err) => this.logger.warn(`Background eSIM email send error: ${err.message}`));
+        return { recipientEmail, sent: true };
+      }
+    } catch (e: any) {
+      this.logger.warn(`Could not dispatch automated eSIM welcome email: ${e.message}`);
+    }
+    return { recipientEmail, sent: false };
   }
 
   /**
@@ -801,7 +1099,8 @@ export class CarrierService {
     msn: string;
     status: string;
     isEsim: boolean;
-    lpaString: string;
+    lpaString: string | null;
+    carrierDispatchedEmail?: boolean;
     emailSent?: boolean;
     emailRecipient?: string;
   }> {
@@ -809,7 +1108,7 @@ export class CarrierService {
     const planNo = dto.planNo || '11144157';
     const planName = dto.planName || 'JM 65GB Auto';
     const pricePerMonth = dto.pricePerMonth || 37.55;
-    const isLive = process.env.TELCO_LIVE_CREATE === 'true';
+    const isLive = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test((dto.custNo || '').trim());
 
     let orderId = `PORT-${Math.floor(100000 + Math.random() * 900000)}`;
 
@@ -827,7 +1126,7 @@ export class CarrierService {
               agentId: '923',
               msn,
               isEsim: true,
-              isQRcode: true,
+              isQRCode: true,
               cycleNo: '28',
               spendCode: '80610',
               notificationEmail: dto.email || 'info@justmobile.ai',
@@ -845,16 +1144,19 @@ export class CarrierService {
 
       try {
         const result: any = await this.soapCall('/UtbOrder', 'orderCreate', requestBody);
-        if (result?.return?.orderId) {
-          orderId = String(result.return.orderId);
+        const ret = this.assertOctaneSoapSuccess('ADD_WME_PORT', result);
+        if (!ret?.orderId) {
+          throw new BadRequestException(this.formatFriendlyCarrierError('ADD_WME_PORT', 'Missing orderId'));
         }
+        orderId = String(ret.orderId);
       } catch (err: any) {
         this.logger.error(`Live port order creation failed: ${err.message}`);
-        throw new BadRequestException(`Carrier port order creation failed: ${err.message}`);
+        if (err instanceof HttpException) throw err;
+        throw new BadRequestException(this.formatFriendlyCarrierError('ADD_WME_PORT', err.message));
       }
     }
 
-    const lpaString = `LPA:1$smdp.telcoinabox.com.au$JM-AU-${orderId}`;
+    const esimDetails = await this.resolveActivatedOrderEsim(isLive, dto.custNo, msn, orderId);
     const now = new Date();
 
     const ordersCol = this.db.getCollection<OrderRecord>('orders');
@@ -873,7 +1175,8 @@ export class CarrierService {
           orderAction: 'ADD_WME_PORT',
           isEsim: true,
           isQRcode: true,
-          lpaString,
+          ...(esimDetails.lpaString ? { lpaString: esimDetails.lpaString } : {}),
+          ...(esimDetails.activationCode ? { activationCode: esimDetails.activationCode } : {}),
           numType: dto.numType,
           dob: dto.dob,
           arn: dto.arn,
@@ -889,42 +1192,19 @@ export class CarrierService {
       { upsert: true },
     );
 
-    // Automated eSIM Welcome Email via Hostinger SMTP (INT-07)
-    let recipientEmail = dto.email;
-    try {
-      let recipientName: string | undefined = dto.firstName && dto.lastName ? `${dto.firstName} ${dto.lastName}` : dto.firstName;
-
-      if (!recipientEmail || !recipientEmail.includes('@') || !recipientName) {
-        const usersCol = this.db.getCollection('users');
-        const user = await usersCol.findOne({
-          $or: [{ custNo: dto.custNo }, { custNo: parseInt(dto.custNo.replace(/\D+/g, ''), 10) }],
-        });
-        if (user?.email && !recipientEmail) {
-          recipientEmail = user.email;
-        }
-        if (user?.name && !recipientName) {
-          recipientName = user.name;
-        }
-      }
-
-      if (recipientEmail && recipientEmail.includes('@')) {
-        this.mailService.sendEsimWelcomeEmail({
-          to: recipientEmail,
-          recipientName,
-          custNo: dto.custNo,
-          orderId,
-          msn,
-          planName,
-          pricePerMonth,
-          lpaString,
-          smdpAddress: 'smdp.telcoinabox.com.au',
-          activationCode: `JM-AU-${orderId}`,
-          isEsim: true,
-        }).catch((err) => this.logger.warn(`Background eSIM email send error: ${err.message}`));
-      }
-    } catch (e: any) {
-      this.logger.warn(`Could not dispatch automated eSIM welcome email: ${e.message}`);
-    }
+    const { recipientEmail, sent: emailSent } = await this.dispatchOrderWelcomeEmail({
+      custNo: dto.custNo,
+      orderId,
+      msn,
+      planName,
+      pricePerMonth,
+      email: dto.email,
+      firstName: dto.firstName,
+      lastName: dto.lastName,
+      lpaString: esimDetails.lpaString,
+      smdpAddress: esimDetails.smdpAddress,
+      activationCode: esimDetails.activationCode,
+    });
 
     return {
       success: true,
@@ -932,8 +1212,9 @@ export class CarrierService {
       msn,
       status: 'PORT_IN_PROGRESS',
       isEsim: true,
-      lpaString,
-      emailSent: Boolean(recipientEmail),
+      lpaString: esimDetails.lpaString,
+      carrierDispatchedEmail: isLive && !esimDetails.lpaString,
+      emailSent: Boolean(emailSent || (isLive && recipientEmail)),
       emailRecipient: recipientEmail,
     };
   }
@@ -973,12 +1254,12 @@ export class CarrierService {
       throw new BadRequestException('Valid Account Number is required to transfer a postpaid contract service.');
     }
 
-    const isLive = process.env.TELCO_LIVE_CREATE === 'true';
+    const isLive = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test((order.custNo || '').trim());
     if (isLive) {
       this.logger.warn(`[LIVE CARRIER CALL] Resubmitting ADD_WME_PORT to Octane for order ${orderId} with updated credentials.`);
       try {
         const msn = order.msn.replace(/\s+/g, '');
-        await this.soapCall('/UtbOrder', 'orderCreate', {
+        const result: any = await this.soapCall('/UtbOrder', 'orderCreate', {
           createRequest: {
             custNo: order.custNo,
             orderType: 'SRVC_ORD',
@@ -990,7 +1271,7 @@ export class CarrierService {
                 agentId: '923',
                 msn,
                 isEsim: true,
-                isQRcode: true,
+                isQRCode: true,
                 cycleNo: '28',
                 spendCode: '80610',
                 notificationEmail: order.email || 'info@justmobile.ai',
@@ -999,9 +1280,11 @@ export class CarrierService {
             },
           },
         });
+        this.assertOctaneSoapSuccess('ADD_WME_PORT resubmission', result);
       } catch (err: any) {
         this.logger.error(`Live port order resubmission failed: ${err.message}`);
-        throw new BadRequestException(`Carrier rejected resubmission: ${err.message}`);
+        if (err instanceof HttpException) throw err;
+        throw new BadRequestException(this.formatFriendlyCarrierError('ADD_WME_PORT resubmission', err.message));
       }
     }
 
@@ -1079,7 +1362,7 @@ export class CarrierService {
   }
 
   /**
-   * Query Order Status
+   * Query Order Status (uses live Octane orderQuery for real carrier orders)
    */
   async queryOrder(orderId: string) {
     const ordersCol = this.db.getCollection<OrderRecord>('orders');
@@ -1089,11 +1372,52 @@ export class CarrierService {
       throw new NotFoundException(`Order with reference ${orderId} not found.`);
     }
 
+    const isLiveOrder =
+      process.env.TELCO_LIVE_CREATE === 'true' &&
+      /^\d+$/.test((order.custNo || '').trim()) &&
+      !/^(ORD|PORT|REP)-/i.test(String(order.orderId || ''));
+
+    let effectiveStatus = order.status;
+    let rejectionReason = order.rejectionReason;
+    let rejectionCode = order.rejectionCode;
+
+    if (isLiveOrder) {
+      const queryRes: any = await this.soapCall('/UtbOrder', 'orderQuery', {
+        request: { orderId: order.orderId },
+      });
+      const ret = queryRes?.return?.orderQueryResponse || queryRes?.return;
+      if (ret) {
+        const liveStatus = String(ret?.internalStatus || ret?.status || '').toUpperCase();
+        if (['COMPLETED', 'ACTIVE', 'PROVISIONED', 'SUCCESS'].includes(liveStatus)) {
+          effectiveStatus = 'ACTIVE';
+          rejectionReason = null;
+          rejectionCode = null;
+        } else if (['REJECTED', 'FAILED', 'CANCELLED'].includes(liveStatus)) {
+          effectiveStatus = 'REJECTED';
+          rejectionReason = ret?.errorMessage || ret?.message || 'Transfer rejected by donor carrier.';
+          rejectionCode = ret?.errorCode ? String(ret.errorCode) : 'DONOR_REJECTED';
+        }
+        if (effectiveStatus !== order.status) {
+          await ordersCol.updateOne(
+            { orderId: order.orderId },
+            {
+              $set: {
+                status: effectiveStatus,
+                rejectionReason: rejectionReason ?? null,
+                rejectionCode: rejectionCode ?? null,
+                updatedAt: new Date(),
+              },
+            },
+          );
+        }
+      }
+    }
+
     return {
       orderId: order.orderId,
       custNo: order.custNo,
       msn: order.msn,
-      status: order.status,
+      status: effectiveStatus,
       planName: order.planName,
       orderType: order.orderType,
       isEsim: order.isEsim,
@@ -1101,8 +1425,8 @@ export class CarrierService {
       dob: order.dob,
       arn: order.arn,
       donorCarrier: order.donorCarrier,
-      rejectionReason: order.rejectionReason,
-      rejectionCode: order.rejectionCode,
+      rejectionReason,
+      rejectionCode,
       portRetries: order.portRetries,
       createdAt: order.createdAt,
     };
@@ -1144,7 +1468,7 @@ export class CarrierService {
   // ==========================================================================
 
   /**
-   * Get Scannable eSIM QR Code & GSMA LPA Details
+   * Get Scannable eSIM QR Code & GSMA LPA Details (queries live Octane getEsimDetails first)
    */
   async getEsimQRCode(identifier: string): Promise<{
     orderId: string;
@@ -1154,15 +1478,56 @@ export class CarrierService {
     qrCodeDataUrl: string;
     instructions: string[];
   }> {
+    const cleanId = String(identifier || '').trim();
     const ordersCol = this.db.getCollection<OrderRecord>('orders');
-    const order = await ordersCol.findOne({
-      $or: [{ orderId: identifier }, { custNo: identifier }, { msn: identifier.replace(/\s+/g, '') }],
-    });
+    const order = await ordersCol.findOne(
+      {
+        $or: [{ orderId: cleanId }, { custNo: cleanId }, { msn: cleanId.replace(/\s+/g, '') }],
+      },
+      { sort: { updatedAt: -1 } },
+    );
 
-    const activeOrderId = order?.orderId || identifier || 'ORD-990001';
-    const smdpAddress = 'smdp.telcoinabox.com.au';
-    const activationCode = `JM-AU-${activeOrderId.replace(/[^a-zA-Z0-9]/g, '')}`;
-    const lpa = order?.lpaString || `LPA:1$${smdpAddress}$${activationCode}`;
+    const activeOrderId = order?.orderId || cleanId || 'ORD-990001';
+    const isLiveOrder =
+      process.env.TELCO_LIVE_CREATE === 'true' &&
+      (Boolean(order?.custNo && /^\d+$/.test(order.custNo.trim())) ||
+        (/^\d+$/.test(cleanId) && cleanId !== 'CUST990001'));
+
+    let smdpAddress = 'smdp.telcoinabox.com.au';
+    let activationCode = '';
+    let lpa = '';
+
+    if (isLiveOrder) {
+      const liveQr = await this.fetchOctaneEsimActivation({
+        custNo: order?.custNo || (/^\d+$/.test(cleanId) && !cleanId.startsWith('04') ? cleanId : undefined),
+        msn: order?.msn || (/^04\d{8}$/.test(cleanId.replace(/\s+/g, '')) ? cleanId : undefined),
+        orderId: order?.orderId || (/^\d+$/.test(cleanId) && !cleanId.startsWith('04') ? cleanId : undefined),
+      }).catch(() => null);
+
+      if (liveQr) {
+        smdpAddress = liveQr.smdpAddress;
+        activationCode = liveQr.activationCode;
+        lpa = liveQr.lpaString;
+      } else if (order?.lpaString && !this.isSyntheticLpa(order.lpaString)) {
+        const parsed = this.parseActivationCodeString(order.lpaString);
+        if (parsed) {
+          smdpAddress = parsed.smdpAddress;
+          activationCode = parsed.activationCode;
+          lpa = parsed.lpaString;
+        }
+      }
+
+      if (!lpa || !activationCode) {
+        throw new BadRequestException(
+          'Your eSIM QR code is not available from the network provider yet. Please check your email or try again shortly.',
+        );
+      }
+    } else {
+      const parsedLpaCode = order?.lpaString?.startsWith('LPA:') ? order.lpaString.split('$')[2] : undefined;
+      activationCode =
+        order?.activationCode || parsedLpaCode || `JM-AU-${activeOrderId.replace(/[^a-zA-Z0-9]/g, '')}`;
+      lpa = order?.lpaString || `LPA:1$${smdpAddress}$${activationCode}`;
+    }
 
     // Generate high-resolution scannable QR Code PNG Data URL
     const qrCodeDataUrl = await QRCode.toDataURL(lpa, {
@@ -1196,9 +1561,12 @@ export class CarrierService {
    */
   async sendOrderEsimEmail(custNo: string, orderId: string, targetEmail?: string) {
     const ordersCol = this.db.getCollection<OrderRecord>('orders');
-    const order = await ordersCol.findOne({
-      $or: [{ orderId }, { custNo }, { msn: orderId.replace(/\s+/g, '') }],
-    });
+    const order = await ordersCol.findOne(
+      {
+        $or: [{ orderId }, { custNo }, { msn: orderId.replace(/\s+/g, '') }],
+      },
+      { sort: { updatedAt: -1 } },
+    );
 
     if (!order) {
       throw new NotFoundException(`Order with reference ${orderId} not found.`);
@@ -1222,9 +1590,7 @@ export class CarrierService {
       throw new BadRequestException('No valid email address found for this order.');
     }
 
-    const smdpAddress = 'smdp.telcoinabox.com.au';
-    const activationCode = `JM-AU-${order.orderId.replace(/[^a-zA-Z0-9]/g, '')}`;
-    const lpaString = order.lpaString || `LPA:1$${smdpAddress}$${activationCode}`;
+    const qrDetails = await this.getEsimQRCode(order.orderId);
 
     const sent = await this.mailService.sendEsimWelcomeEmail({
       to: email,
@@ -1234,9 +1600,9 @@ export class CarrierService {
       msn: order.msn,
       planName: order.planName,
       pricePerMonth: order.pricePerMonth,
-      lpaString,
-      smdpAddress,
-      activationCode,
+      lpaString: qrDetails.lpa,
+      smdpAddress: qrDetails.smdpAddress,
+      activationCode: qrDetails.activationCode,
       isEsim: order.isEsim ?? true,
     });
 
@@ -1249,6 +1615,248 @@ export class CarrierService {
       message: sent
         ? `eSIM activation QR code and LPA string sent to ${email} via Hostinger SMTP.`
         : 'Could not deliver email.',
+    };
+  }
+
+  /**
+   * Issue a Replacement eSIM Profile & QR Code (Reset eSIM or CHANGE_WME_SIM swap)
+   * Protected by 2FA in Customer Portal or OTP session in Chatbot.
+   */
+  async replaceEsimProfile(
+    custNo: string,
+    options?: { msn?: string; reason?: string; email?: string },
+  ) {
+    const cleanCustNo = String(custNo || '').trim();
+    if (!cleanCustNo) {
+      throw new BadRequestException('Customer number is required.');
+    }
+
+    const ordersCol = this.db.getCollection<OrderRecord>('orders');
+    const replacementsCol = this.db.getCollection('esim_replacements');
+    const [existingOrder, userDoc] = await Promise.all([
+      ordersCol.findOne({ custNo: cleanCustNo }, { sort: { updatedAt: -1 } }),
+      this.findUserDoc(cleanCustNo),
+    ]);
+
+    const cleanMsn = (
+      options?.msn ||
+      existingOrder?.msn ||
+      userDoc?.phone ||
+      '0491570006'
+    ).replace(/\s+/g, '');
+
+    // Enforce 24-hour rate limit per service on non-sandbox accounts to prevent repeated SIM swap abuse
+    if (cleanCustNo !== 'CUST990001') {
+      const cooldownSince = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const recentReplacement = await replacementsCol.findOne({
+        custNo: cleanCustNo,
+        msn: cleanMsn,
+        createdAt: { $gte: cooldownSince },
+      });
+      if (recentReplacement) {
+        throw new BadRequestException(
+          'An eSIM replacement was already issued for this mobile number in the last 24 hours. Please contact 1300 492 002 or info@justmobile.ai for urgent help.',
+        );
+      }
+    }
+
+    const recipientEmail =
+      options?.email || existingOrder?.email || userDoc?.email || '';
+    const recipientName = userDoc?.name || undefined;
+
+    const isLive =
+      process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
+
+    const replacementRef = `REP-ESIM-${Math.floor(100000 + Math.random() * 900000)}`;
+    let smdpAddress = 'smdp.telcoinabox.com.au';
+    let activationCode: string | null = isLive
+      ? null
+      : `JM-REP-${replacementRef.replace(/[^a-zA-Z0-9]/g, '')}-${Date.now().toString().slice(-4)}`;
+    let lpaString: string | null = isLive ? null : `LPA:1$${smdpAddress}$${activationCode}`;
+    let carrierActionTaken = isLive ? 'PENDING_CARRIER' : 'SANDBOX_PROFILE_REISSUED';
+    let carrierOrderId: string | undefined;
+
+    if (isLive) {
+      const liveSvc = await this.resolveLiveServiceLine(cleanCustNo, cleanMsn);
+      const effectiveLineSeqNo = liveSvc.lineSeqNo;
+      const effectiveMsn = liveSvc.msn || cleanMsn;
+
+      // Step 1: Check live eSIM profile state via Octane REST getEsimDetails & reset if resettable
+      // (Never auto-submit CHANGE_WME_SIM blindly without confirmed reseller eSIM swap rules)
+      try {
+        const details = await this.restCall<any>(
+          '/api/v1/mobile/resource/getEsimDetails',
+          {
+            requestType: 'SIM Details',
+            custno: Number(cleanCustNo),
+            lineseqno: effectiveLineSeqNo,
+            msn: effectiveMsn,
+          },
+        );
+        const simNode = details?.simDetails || details?.esimDetails || details;
+        const profileState = String(simNode?.profileState || details?.profileState || '').toUpperCase();
+        const esimId =
+          simNode?.esimIdentifier ||
+          simNode?.eSIMIdentifier ||
+          simNode?.extra1 ||
+          details?.eSIMIdentifier ||
+          details?.esimIdentifier;
+        if (
+          esimId &&
+          ['RELEASED', 'LINKED', 'AVAILABLE', 'ERROR'].includes(profileState)
+        ) {
+          await this.restCall('/api/v1/mobile/resource/manageEsim', {
+            custNo: Number(cleanCustNo),
+            eSIMIdentifier: String(esimId),
+            lineSeqNo: effectiveLineSeqNo,
+            orderType: 'Reset Esim',
+            resetEsim: { targetState: 'RELEASED' },
+          });
+          carrierActionTaken = 'OCTANE_MANAGE_ESIM_RESET';
+        }
+      } catch (err: any) {
+        this.logger.warn(
+          `Octane REST getEsimDetails/manageEsim reset unavailable for ${cleanCustNo}: ${err.message}`,
+        );
+      }
+
+      // Step 2: Retrieve genuine activationCode/LPA from Octane REST getEsimDetails (never synthesize a fake QR)
+      const qrDetails = await this.fetchOctaneEsimActivation({
+        custNo: cleanCustNo,
+        msn: effectiveMsn,
+        lineSeqNo: effectiveLineSeqNo,
+      }).catch((err: any) => {
+        this.logger.warn(
+          `Octane REST getEsimDetails QR lookup unavailable after ${carrierActionTaken} for ${cleanCustNo}: ${err.message}`,
+        );
+        return null;
+      });
+      if (qrDetails) {
+        smdpAddress = qrDetails.smdpAddress;
+        activationCode = qrDetails.activationCode;
+        lpaString = qrDetails.lpaString;
+      }
+
+      // Atomic fail-closed guard: if Octane neither reset the eSIM profile nor returned a valid QR code, do not save anything
+      if (carrierActionTaken !== 'OCTANE_MANAGE_ESIM_RESET' && !lpaString) {
+        throw new BadRequestException(
+          'We could not reset your existing eSIM profile automatically. Please try again or contact our support team on 1300 492 002 or info@justmobile.ai so we can issue a fresh replacement eSIM for you.',
+        );
+      }
+    }
+
+    const qrCodeDataUrl = lpaString
+      ? await QRCode.toDataURL(lpaString, {
+          errorCorrectionLevel: 'M',
+          margin: 2,
+          width: 320,
+          color: { dark: '#142420', light: '#FFFFFF' },
+        })
+      : null;
+
+    const now = new Date();
+    if (existingOrder) {
+      await ordersCol.updateOne(
+        { _id: (existingOrder as any)._id },
+        {
+          $set: {
+            ...(lpaString ? { lpaString, activationCode } : {}),
+            ...(carrierOrderId ? { lastCarrierOrderId: carrierOrderId } : {}),
+            isEsim: true,
+            isQRcode: true,
+            updatedAt: now,
+          } as any,
+        },
+      );
+    } else if (cleanCustNo !== 'CUST990001') {
+      await ordersCol.insertOne({
+        orderId: carrierOrderId || replacementRef,
+        custNo: cleanCustNo,
+        msn: cleanMsn,
+        planNo: '11144157',
+        planName: userDoc?.planName || 'JM 65GB Auto',
+        pricePerMonth: userDoc?.planPrice || 37.55,
+        status: 'ACTIVE',
+        orderType: 'ESIM_REPLACEMENT',
+        orderAction: 'CHANGE_WME_SIM',
+        isEsim: true,
+        isQRcode: true,
+        ...(lpaString ? { lpaString } : {}),
+        ...(activationCode ? { activationCode } : {}),
+        email: recipientEmail,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    if (cleanCustNo !== 'CUST990001') {
+      await replacementsCol.insertOne({
+        referenceNumber: replacementRef,
+        carrierOrderId: carrierOrderId || null,
+        custNo: cleanCustNo,
+        msn: cleanMsn,
+        email: recipientEmail,
+        reason: options?.reason || 'Customer requested replacement eSIM QR code',
+        carrierActionTaken,
+        lpaString: lpaString || null,
+        createdAt: now,
+      });
+    }
+
+    let emailSent = false;
+    if (
+      lpaString &&
+      activationCode &&
+      recipientEmail &&
+      recipientEmail.includes('@') &&
+      !recipientEmail.endsWith('@example.com') &&
+      !recipientEmail.endsWith('.invalid')
+    ) {
+      emailSent = await this.mailService
+        .sendEsimWelcomeEmail({
+          to: recipientEmail,
+          recipientName,
+          custNo: cleanCustNo,
+          orderId: carrierOrderId || existingOrder?.orderId || replacementRef,
+          msn: cleanMsn,
+          planName: existingOrder?.planName || userDoc?.planName || 'JustMobile eSIM Plan',
+          pricePerMonth: existingOrder?.pricePerMonth || userDoc?.planPrice || 37.55,
+          lpaString,
+          smdpAddress,
+          activationCode,
+          isEsim: true,
+        })
+        .catch(() => false);
+    }
+
+    const carrierDispatchedEmail = false;
+
+    return {
+      success: true,
+      referenceNumber: replacementRef,
+      orderId: carrierOrderId || existingOrder?.orderId || replacementRef,
+      msn: cleanMsn,
+      lpa: lpaString,
+      smdpAddress: lpaString ? smdpAddress : null,
+      activationCode,
+      qrCodeDataUrl,
+      emailSent,
+      carrierDispatchedEmail,
+      email: recipientEmail,
+      carrierActionTaken,
+      instructions: [
+        'Connect your phone to a stable Wi-Fi network.',
+        'Open Settings > Mobile / Cellular > Add eSIM.',
+        lpaString
+          ? 'Scan the replacement QR code below or enter the SM-DP+ Address and Activation Code manually.'
+          : 'Your existing eSIM profile has been reset. If you do not see the QR yet, please try again shortly or contact 1300 492 002.',
+        'Select your JustMobile eSIM line for Voice, SMS, and Mobile Data.',
+      ],
+      message: lpaString
+        ? `Replacement eSIM QR code (${replacementRef}) has been issued${
+            emailSent ? ` and emailed to ${recipientEmail}` : ''
+          }.`
+        : `Your eSIM profile (${replacementRef}) has been reset with the carrier. Please try fetching your QR code again in a moment.`,
     };
   }
 
@@ -1269,13 +1877,16 @@ export class CarrierService {
     const transactionId = `TX-PORT-${Date.now()}`;
     const mockCode = '829104';
 
-    if (process.env.TELCO_LIVE_CREATE === 'true') {
+    const cleanCustNo = (custNo || '').trim();
+    const isLive = process.env.TELCO_LIVE_CREATE === 'true' && (!cleanCustNo || /^\d+$/.test(cleanCustNo));
+
+    if (isLive) {
       try {
         const result: any = await this.soapCall('/UtbOTP', 'manageOtp', {
           manageOtpRequest: {
             requestType: 'getOtp',
             getOtp: {
-              custNo,
+              custNo: cleanCustNo,
               destination: cleanDestination,
               destinationCategory: 'Phone (Bh)',
               destinationType: 'Primary Account Holder',
@@ -1286,15 +1897,20 @@ export class CarrierService {
           },
         });
 
-        const liveTx = result?.return?.transactionId || transactionId;
+        const ret = this.assertOctaneSoapSuccess('UtbOTP getOtp', result);
+        if (!ret?.transactionId) {
+          throw new BadRequestException(this.formatFriendlyCarrierError('UtbOTP getOtp', 'Missing transactionId'));
+        }
         return {
           success: true,
-          transactionId: liveTx,
+          transactionId: String(ret.transactionId),
           destination: cleanDestination,
           message: `ACMA security code dispatched to ${cleanDestination}.`,
         };
       } catch (err: any) {
-        this.logger.warn(`Live OTP dispatch error: ${err.message}`);
+        this.logger.error(`Live OTP dispatch failed: ${err.message}`);
+        if (err instanceof HttpException) throw err;
+        throw new BadRequestException(this.formatFriendlyCarrierError('UtbOTP getOtp', err.message));
       }
     }
 
@@ -1331,8 +1947,12 @@ export class CarrierService {
     message: string;
   }> {
     const cleanCode = code.trim();
+    const isLiveTx =
+      process.env.TELCO_LIVE_CREATE === 'true' &&
+      !transactionId.startsWith('TX-PORT-') &&
+      transactionId !== 'TX-DEV';
 
-    if (process.env.TELCO_LIVE_CREATE === 'true') {
+    if (isLiveTx) {
       try {
         const result: any = await this.soapCall('/UtbOTP', 'manageOtp', {
           manageOtpRequest: {
@@ -1344,20 +1964,26 @@ export class CarrierService {
           },
         });
 
-        const verified = Boolean(result?.return?.success);
+        const ret = this.assertOctaneSoapSuccess('UtbOTP verifyOtp', result);
+        const verified = Boolean(ret?.success);
+        if (!verified) {
+          throw new BadRequestException('The verification code was incorrect or expired. Please check your SMS and try again.');
+        }
         return {
           success: true,
-          verified,
+          verified: true,
           transactionId,
-          message: verified ? 'Mobile number verified.' : 'Invalid code.',
+          message: 'Mobile number verified.',
         };
       } catch (err: any) {
-        this.logger.warn(`Live OTP verify failed: ${err.message}`);
+        this.logger.error(`Live OTP verify failed: ${err.message}`);
+        if (err instanceof HttpException) throw err;
+        throw new BadRequestException(this.formatFriendlyCarrierError('UtbOTP verifyOtp', err.message));
       }
     }
 
-    // Test code 829104 or database match
-    if (cleanCode === '829104') {
+    // Development fallback only when live carrier integration is disabled
+    if (process.env.TELCO_LIVE_CREATE !== 'true' && cleanCode === '829104') {
       return {
         success: true,
         verified: true,
@@ -1425,47 +2051,58 @@ export class CarrierService {
     const cleanMsn = (dto.msn || existingOrder?.msn || userDoc?.phone || '0491570006').replace(/\s+/g, '');
     const isLive = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
 
-    const PLAN_ID_TO_NO: Record<string, string> = {
-      'plan-10gb': '11144153',
-      'plan-15gb': '11144154',
-      'plan-29gb': '11144155',
-      'plan-65gb': '11144157',
-      'plan-100gb': '11144168',
-      'plan-120gb': '11144169',
-      'plan-150gb': '11144170',
-      'plan-180gb': '11156014',
-    };
-    const targetPlanNo = (dto.planId && PLAN_ID_TO_NO[dto.planId]) || '11144157';
+    const resolvedPlan = this.resolvePlanDetails(dto.planName, dto.planId);
+    const targetPlanNo = resolvedPlan?.planNo || '';
+    if (isLive && !targetPlanNo) {
+      throw new BadRequestException('Selected plan could not be matched to a valid carrier plan.');
+    }
+
+    let carrierOrderId: string | undefined;
+    let effectiveMsn = cleanMsn;
 
     if (isLive) {
-      this.logger.warn(`[LIVE CARRIER CALL] Submitting plan change to Octane for ${cleanCustNo}`);
+      const liveSvc = await this.resolveLiveServiceLine(cleanCustNo, dto.msn);
+      effectiveMsn = liveSvc.msn || cleanMsn;
+      const custReqDate = new Date().toISOString().split('T')[0];
+
+      this.logger.warn(
+        `[LIVE CARRIER CALL] Submitting CHANGE_WME_PLAN to Octane for ${cleanCustNo} (lineSeqNo=${liveSvc.lineSeqNo}, planno=${targetPlanNo})`,
+      );
       try {
-        await this.soapCall('/UtbOrder', 'orderCreate', {
+        const result: any = await this.soapCall('/UtbOrder', 'orderCreate', {
           createRequest: {
             custNo: cleanCustNo,
             orderType: 'SRVC_ORD',
-            orderAction: 'CHG_PLAN',
+            orderAction: 'CHANGE_WME_PLAN',
             orderItems: {
-              wmeChgPlanReqItem: {
-                msn: cleanMsn,
-                planNo: targetPlanNo,
+              wmeModifyPlanReqItem: {
+                lineSeqNo: liveSvc.lineSeqNo,
+                planno: Number(targetPlanNo),
+                custReqDate,
               },
             },
           },
         });
+        const ret = this.assertOctaneSoapSuccess('CHANGE_WME_PLAN', result);
+        if (ret?.orderId) {
+          carrierOrderId = String(ret.orderId);
+        }
       } catch (err: any) {
-        this.logger.error(`Live plan change failed: ${err.message}`);
+        this.logger.error(`Live plan change failed for ${cleanCustNo}: ${err.message}`);
+        if (err instanceof HttpException) throw err;
+        throw new BadRequestException(this.formatFriendlyCarrierError('CHANGE_WME_PLAN', err.message));
       }
     }
 
     const now = new Date();
+    const effectivePlanNo = targetPlanNo || '11144157';
 
     if (existingOrder) {
       await ordersCol.updateMany(
         { custNo: cleanCustNo },
         {
           $set: {
-            planNo: targetPlanNo,
+            planNo: effectivePlanNo,
             planName: dto.planName,
             pricePerMonth: dto.monthlyFee,
             updatedAt: now,
@@ -1473,12 +2110,12 @@ export class CarrierService {
         },
       );
     } else {
-      const orderId = `ORD-${Math.floor(100000 + Math.random() * 900000)}`;
+      const orderId = carrierOrderId || `ORD-${Math.floor(100000 + Math.random() * 900000)}`;
       await ordersCol.insertOne({
         orderId,
         custNo: cleanCustNo,
-        msn: cleanMsn,
-        planNo: targetPlanNo,
+        msn: effectiveMsn,
+        planNo: effectivePlanNo,
         planName: dto.planName,
         pricePerMonth: dto.monthlyFee,
         status: 'ACTIVE',
@@ -1486,7 +2123,7 @@ export class CarrierService {
         orderAction: 'CHANGE_WME_PLAN',
         isEsim: true,
         isQRcode: true,
-        lpaString: `LPA:1$smdp.telcoinabox.com.au$JM-AU-${orderId}`,
+        ...(isLive ? {} : { lpaString: `LPA:1$smdp.telcoinabox.com.au$JM-AU-${orderId}` }),
         email: userDoc?.email,
         createdAt: now,
         updatedAt: now,
@@ -1497,11 +2134,13 @@ export class CarrierService {
     const planChangesCol = this.db.getCollection('plan_changes');
     await planChangesCol.insertOne({
       custNo: cleanCustNo,
-      msn: cleanMsn,
+      msn: effectiveMsn,
+      carrierOrderId: carrierOrderId || null,
       newPlanName: dto.planName,
+      planNo: effectivePlanNo,
       monthlyFee: dto.monthlyFee,
       dataGb: dto.dataGb,
-      previousPlanName: existingOrder?.planName || '50GB Just right Plan',
+      previousPlanName: existingOrder?.planName || 'Active Mobile Plan',
       changedAt: now,
     });
 

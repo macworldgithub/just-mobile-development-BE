@@ -377,24 +377,6 @@ export class ChatService {
       {
         type: 'function',
         function: {
-          name: 'manage_data_addon_or_alerts',
-          description:
-            'Purchase/cancel a $10 20GB 30-day Data Top-Up Pack or enable/disable low-data usage alerts (requires OTP verification; add-on purchase/cancellation requires confirmed: true).',
-          parameters: {
-            type: 'object',
-            properties: {
-              custNo: { type: 'string' },
-              action: { type: 'string', enum: ['add_data_pack', 'cancel_data_pack', 'enable_alerts', 'disable_alerts'] },
-              msn: { type: 'string' },
-              confirmed: { type: 'boolean' },
-            },
-            required: ['custNo', 'action', 'confirmed'],
-          },
-        },
-      },
-      {
-        type: 'function',
-        function: {
           name: 'manage_roaming',
           description:
             'Activate or disable International Roaming Travel Pack ($5/day 2GB across 20 eligible destinations). Requires OTP verification and confirmed: true.',
@@ -416,12 +398,22 @@ export class ChatService {
         function: {
           name: 'resend_esim_qr',
           description:
-            'Resend an eSIM activation QR code email for an existing verified customer order (requires OTP verification).',
+            'Resend an eSIM activation QR code email OR issue a brand-new replacement eSIM QR code (set replaceProfile: true when the customer accidentally deleted/removed their eSIM or switched phones) after OTP verification.',
           parameters: {
             type: 'object',
             properties: {
               custNo: { type: 'string' },
               orderId: { type: 'string', description: 'Optional specific orderId' },
+              msn: { type: 'string', description: 'Optional 10-digit mobile number' },
+              replaceProfile: {
+                type: 'boolean',
+                description: 'Set true ONLY after explicit customer confirmation to issue a brand-new replacement eSIM profile/QR (invalidates prior active QR)',
+              },
+              reason: { type: 'string', description: 'Optional reason for replacement' },
+              confirmed: {
+                type: 'boolean',
+                description: 'Required (true) when replaceProfile is true after the customer explicitly confirms replacement',
+              },
             },
             required: ['custNo'],
           },
@@ -934,45 +926,6 @@ export class ChatService {
         });
       }
 
-      if (name === 'manage_data_addon_or_alerts') {
-        const custNo = String(args.custNo || '').trim();
-        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
-          return JSON.stringify({ success: false, error: 'OTP verification required first.' });
-        }
-        const isAlertAction = args.action === 'enable_alerts' || args.action === 'disable_alerts';
-        if (!isAlertAction && !args.confirmed) {
-          return JSON.stringify({
-            success: false,
-            error: 'Present pack details ($10 for 20GB, valid 30 days) and confirm with the customer before proceeding.',
-          });
-        }
-        const ref = `ADD-JM-${Math.floor(100000 + Math.random() * 900000)}`;
-        await this.db.getCollection('service_addons').insertOne({
-          referenceNumber: ref,
-          custNo,
-          msn: args.msn || null,
-          addonType: isAlertAction ? 'LOW_DATA_ALERTS' : 'DATA_PACK_20GB',
-          action: args.action,
-          priceAud: args.action === 'add_data_pack' ? 10.0 : 0,
-          validityDays: args.action === 'add_data_pack' ? 30 : null,
-          status: args.action === 'cancel_data_pack' || args.action === 'disable_alerts' ? 'INACTIVE' : 'ACTIVE',
-          createdAt: new Date(),
-        });
-        return JSON.stringify({
-          success: true,
-          referenceNumber: ref,
-          action: args.action,
-          note:
-            args.action === 'add_data_pack'
-              ? '20GB Data Top-Up ($10, valid 30 days) enabled.'
-              : args.action === 'cancel_data_pack'
-              ? 'Data add-on stopped cleanly; expires at end of current pack validity.'
-              : args.action === 'enable_alerts'
-              ? 'Low-data usage alerts (50%, 85%, 100%) enabled.'
-              : 'Optional low-data alerts disabled (mandatory ACMA spend/usage notices remain active).',
-        });
-      }
-
       if (name === 'manage_roaming') {
         const custNo = String(args.custNo || '').trim();
         if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
@@ -1012,6 +965,33 @@ export class ChatService {
         if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
           return JSON.stringify({ success: false, error: 'OTP verification required first.' });
         }
+        if (args.replaceProfile) {
+          if (!args.confirmed) {
+            return JSON.stringify({
+              success: false,
+              error: 'Issuing a replacement eSIM replaces/invalidates the previous eSIM QR. Confirm with the customer first before calling resend_esim_qr with replaceProfile: true and confirmed: true.',
+            });
+          }
+          const user = await this.findCustomerByIdentifier(custNo);
+          const rep = await this.carrierService.replaceEsimProfile(custNo, {
+            msn: args.msn,
+            reason: args.reason || 'Requested replacement eSIM via verified Bele chat',
+            email: user?.email,
+          });
+          return JSON.stringify({
+            sent: true,
+            replaced: true,
+            referenceNumber: rep.referenceNumber,
+            orderId: rep.orderId,
+            lpa: rep.lpa,
+            smdpAddress: rep.smdpAddress,
+            activationCode: rep.activationCode,
+            emailDispatched: rep.emailSent,
+            carrierDispatchedEmail: rep.carrierDispatchedEmail,
+            maskedEmail: this.maskEmail(user?.email || rep.email || ''),
+            message: rep.message,
+          });
+        }
         const orders = await this.carrierService.getCustomerOrders(custNo);
         const order =
           (args.orderId && orders.find((o) => o.orderId === args.orderId)) || orders[0];
@@ -1029,6 +1009,13 @@ export class ChatService {
               .sendOrderEsimEmail(custNo, order.orderId, user?.email)
               .catch(() => ({ success: false, email: user?.email }))
           : { success: false, email: user?.email };
+        if (!qr && !emailRes?.success) {
+          return JSON.stringify({
+            sent: false,
+            error:
+              'Your eSIM QR code is not ready from the carrier yet. Please try again shortly or confirm if you want to issue a replacement eSIM.',
+          });
+        }
         return JSON.stringify({
           sent: true,
           orderId: qr?.orderId || targetId,

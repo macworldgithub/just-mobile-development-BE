@@ -58,46 +58,31 @@ export class CarrierPortingWorker implements OnModuleInit, OnModuleDestroy {
 
       for (const order of pendingOrders) {
         try {
-          if (isLive) {
-            // Live Octane orderQuery call
-            const queryRes: any = await this.carrierService.soapCall('/UtbOrder', 'orderQuery', {
-              request: { orderId: order.orderId },
-            });
+          const isLiveOrder =
+            isLive &&
+            /^\d+$/.test(String(order.custNo || '').trim()) &&
+            !/^(ORD|PORT|REP)-/i.test(String(order.orderId || ''));
 
-            const ret = queryRes?.return?.orderQueryResponse || queryRes?.return;
-            const liveStatus = String(ret?.internalStatus || ret?.status || '').toUpperCase();
-
-            this.logger.log(`[PORTING WORKER] Order ${order.orderId} live Octane status: ${liveStatus}`);
-
-            if (['COMPLETED', 'ACTIVE', 'PROVISIONED', 'SUCCESS'].includes(liveStatus)) {
+          if (isLiveOrder) {
+            const live = await this.carrierService.queryOrder(order.orderId);
+            this.logger.log(`[PORTING WORKER] Order ${order.orderId} live Octane status: ${live.status}`);
+            if (live.status === 'ACTIVE') {
               await this.transitionToActive(order);
-            } else if (['REJECTED', 'FAILED', 'CANCELLED'].includes(liveStatus)) {
-              const errorMessage = ret?.errorMessage || ret?.message || 'Identity details do not match donor carrier records.';
-              const errorCode = ret?.errorCode || 'DONOR_REJECTED';
-              await ordersCol.updateOne(
-                { orderId: order.orderId },
-                {
-                  $set: {
-                    status: 'REJECTED',
-                    rejectionReason: errorMessage,
-                    rejectionCode: errorCode,
-                    updatedAt: new Date(),
-                  },
-                },
+            } else if (live.status === 'REJECTED') {
+              this.logger.warn(
+                `[PORTING WORKER] Order ${order.orderId} rejected by donor carrier: ${live.rejectionReason || 'Donor rejected'}`,
               );
-              this.logger.warn(`[PORTING WORKER] Order ${order.orderId} rejected by donor carrier: ${errorMessage}`);
             }
           } else {
-            // Development / Simulation Mode:
-            // Simulate realistic donor network release after 45 seconds
+            // Sandbox / Non-live Simulation Mode only:
             const ageMs = Date.now() - new Date(order.createdAt || 0).getTime();
-            const SIMULATED_PORT_DELAY_MS = 45000; // 45 seconds
+            const SIMULATED_PORT_DELAY_MS = 45000;
 
             if (ageMs >= SIMULATED_PORT_DELAY_MS) {
               await this.transitionToActive(order);
             } else {
               this.logger.log(
-                `[PORTING WORKER] Order ${order.orderId} (MSN: ${order.msn}) in progress (${Math.round(ageMs / 1000)}s / 45s simulated donor release).`,
+                `[PORTING WORKER] Sandbox order ${order.orderId} (MSN: ${order.msn}) in progress (${Math.round(ageMs / 1000)}s / 45s).`,
               );
             }
           }
@@ -164,7 +149,36 @@ export class CarrierPortingWorker implements OnModuleInit, OnModuleDestroy {
       return { orderId, status: 'ACTIVE', message: 'Service is already active on Telstra Wholesale.' };
     }
 
-    // Force transition
+    const isLiveOrder =
+      process.env.TELCO_LIVE_CREATE === 'true' &&
+      /^\d+$/.test(String(order.custNo || '').trim()) &&
+      !/^(ORD|PORT|REP)-/i.test(String(order.orderId || ''));
+
+    if (isLiveOrder) {
+      const live = await this.carrierService.queryOrder(order.orderId);
+      if (live.status === 'ACTIVE') {
+        await this.transitionToActive(order);
+        return {
+          orderId,
+          status: 'ACTIVE',
+          message: 'Mobile number transfer confirmed by carrier and activated on network.',
+        };
+      }
+      if (live.status === 'REJECTED') {
+        return {
+          orderId,
+          status: 'REJECTED',
+          message: live.rejectionReason || 'Transfer was rejected by the donor carrier. Please update your details and resubmit.',
+        };
+      }
+      return {
+        orderId,
+        status: live.status,
+        message: 'Porting transfer is still being processed by the carrier. Please try again shortly.',
+      };
+    }
+
+    // Sandbox transition
     await this.transitionToActive(order);
     return {
       orderId,
