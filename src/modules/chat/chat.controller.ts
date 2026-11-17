@@ -6,11 +6,17 @@ export class ChatController {
   constructor(private readonly chatService: ChatService) {}
 
   @Post()
-  async chat(@Body() body: { messages: Array<{ role: string; content: string }> }) {
+  async chat(
+    @Body()
+    body: {
+      messages: Array<{ role: string; content: string }>;
+      sessionId?: string;
+    },
+  ) {
     if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
       throw new BadRequestException('Messages array is required.');
     }
 
-    return await this.chatService.generateResponse(body.messages);
+    return await this.chatService.generateResponse(body.messages, body.sessionId);
   }
 }

@@ -1423,7 +1423,7 @@ export class CarrierService {
     ]);
 
     const cleanMsn = (dto.msn || existingOrder?.msn || userDoc?.phone || '0491570006').replace(/\s+/g, '');
-    const isLive = process.env.TELCO_LIVE_CREATE === 'true';
+    const isLive = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
 
     const PLAN_ID_TO_NO: Record<string, string> = {
       'plan-10gb': '11144153',

@@ -659,4 +659,51 @@ export class MailService {
       return false;
     }
   }
+
+  /**
+   * Send a transactional confirmation email (plan change, invoice copy, cancellation notice)
+   */
+  async sendCustomerNotificationEmail(
+    to: string,
+    subject: string,
+    messageBody: string,
+  ): Promise<boolean> {
+    const cleanTo = (to || '').trim().toLowerCase();
+    if (!cleanTo || !cleanTo.includes('@') || cleanTo.endsWith('@example.com') || cleanTo.endsWith('.invalid')) {
+      return false;
+    }
+    if (!this.transporter) {
+      this.initTransporter();
+    }
+    const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@justmobile.com.au';
+    const sender = `"JustMobile Support" <${fromEmail}>`;
+    const html = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 28px; background: #ffffff; border: 1px solid #e2ebe0; border-radius: 14px;">
+        <h2 style="color: #142420; margin: 0 0 12px 0;">JustMobile Confirmation</h2>
+        <p style="color: #374151; font-size: 14.5px; line-height: 1.65; white-space: pre-line;">${messageBody}</p>
+        <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 20px 0;" />
+        <p style="color: #6b7280; font-size: 12px; margin: 0;">
+          Need help? Email <strong>info@justmobile.ai</strong> or call <strong>1300 492 002</strong> (Mon–Fri, 9:00 AM – 5:00 PM AEST/AEDT).<br/>
+          JustMobile Australia · ABN 48 672 819 204
+        </p>
+      </div>
+    `;
+    try {
+      if (this.transporter) {
+        const info = await this.transporter.sendMail({
+          from: sender,
+          to: cleanTo,
+          subject,
+          text: messageBody,
+          html,
+        });
+        this.logger.log(`✓ Confirmation email sent to ${cleanTo}: ${info.messageId}`);
+        return true;
+      }
+      return false;
+    } catch (err: any) {
+      this.logger.warn(`Confirmation email warning for ${cleanTo}: ${err.message}`);
+      return false;
+    }
+  }
 }

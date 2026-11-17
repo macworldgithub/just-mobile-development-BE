@@ -387,9 +387,8 @@ export class InvoiceService {
     const maskedLast4 = (dto.cardLast4 || '4242').replace(/\D/g, '').slice(-4) || '4242';
     const paymentMethod = dto.paymentMethod || `Visa/Mastercard ending in ${maskedLast4}`;
 
-    const auditCol = this.db.getCollection('audit_events');
-    await auditCol.insertOne({
-      recordType: 'payment',
+    const paymentsCol = this.db.getCollection('payments');
+    await paymentsCol.insertOne({
       transactionRef,
       custNo,
       invoiceId: dto.invoiceId || null,
@@ -443,7 +442,6 @@ export class InvoiceService {
     const createdAt = new Date();
 
     const doc = {
-      recordType: 'bill_query',
       queryId,
       custNo,
       invoiceId: dto.invoiceId || 'GENERAL',
@@ -456,8 +454,8 @@ export class InvoiceService {
       updatedAt: createdAt,
     };
 
-    const auditCol = this.db.getCollection('audit_events');
-    await auditCol.insertOne(doc);
+    const queriesCol = this.db.getCollection('bill_queries');
+    await queriesCol.insertOne(doc);
 
     this.logger.log(`✓ Bill query ${queryId} logged for custNo ${custNo} (Invoice: ${doc.invoiceId})`);
 
@@ -474,9 +472,9 @@ export class InvoiceService {
    * Retrieve customer bill queries
    */
   async getBillQueries(custNo: string) {
-    const auditCol = this.db.getCollection('audit_events');
-    const queries = await auditCol
-      .find({ custNo, recordType: 'bill_query' })
+    const queriesCol = this.db.getCollection('bill_queries');
+    const queries = await queriesCol
+      .find({ custNo })
       .sort({ createdAt: -1 })
       .toArray();
     return {

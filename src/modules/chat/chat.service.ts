@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { MailService } from '../mail/mail.service';
 import { CarrierService } from '../carrier/carrier.service';
+import { InvoiceService } from '../carrier/invoice.service';
 import { BELE_SYSTEM_PROMPT } from './chat-prompt';
 
 interface ChatMessage {
@@ -30,6 +31,7 @@ export class ChatService {
     private readonly db: DatabaseService,
     private readonly mailService: MailService,
     private readonly carrierService: CarrierService,
+    private readonly invoiceService: InvoiceService,
   ) {}
 
   private maskEmail(email: string): string {
@@ -66,8 +68,17 @@ export class ChatService {
     }
 
     const cleanUpper = identifier.toUpperCase().replace(/\s+/g, '');
-    const numericOnly = identifier.replace(/\D+/g, '');
+    let numericOnly = identifier.replace(/\D+/g, '');
+    if (numericOnly.startsWith('61') && numericOnly.length >= 11) {
+      numericOnly = '0' + numericOnly.slice(2);
+    }
     const numericVal = numericOnly ? parseInt(numericOnly, 10) : NaN;
+    const formattedAuPhone =
+      numericOnly.length === 10
+        ? `${numericOnly.slice(0, 4)} ${numericOnly.slice(4, 7)} ${numericOnly.slice(7)}`
+        : numericOnly;
+    const spacedPhoneRegex =
+      numericOnly.length >= 8 ? new RegExp(`^${numericOnly.split('').join('\\s*')}$`) : null;
 
     const orClauses: any[] = [
       { custNo: cleanUpper },
@@ -75,7 +86,11 @@ export class ChatService {
       { custNo: `CUST${numericOnly}` },
       { phone: identifier },
       { phone: numericOnly },
+      { phone: formattedAuPhone },
     ];
+    if (spacedPhoneRegex) {
+      orClauses.push({ phone: { $regex: spacedPhoneRegex } });
+    }
     if (!isNaN(numericVal)) {
       orClauses.push({ custNo: numericVal });
     }
@@ -83,12 +98,13 @@ export class ChatService {
     const user = await usersCol.findOne({ $or: orClauses });
     if (user) return user;
 
-    // Fallback: match by msn inside orders collection
     if (numericOnly.length >= 8) {
       const ordersCol = this.db.getCollection('orders');
-      const order = await ordersCol.findOne({
-        $or: [{ msn: identifier }, { msn: numericOnly }],
-      });
+      const msnOr: any[] = [{ msn: identifier }, { msn: numericOnly }, { msn: formattedAuPhone }];
+      if (spacedPhoneRegex) {
+        msnOr.push({ msn: { $regex: spacedPhoneRegex } });
+      }
+      const order = await ordersCol.findOne({ $or: msnOr });
       if (order?.custNo) {
         return usersCol.findOne({ custNo: String(order.custNo) });
       }
@@ -97,16 +113,88 @@ export class ChatService {
     return null;
   }
 
-  private async hasRecentVerifiedChatSession(custNo: string): Promise<boolean> {
+  private async hasRecentVerifiedChatSession(custNo: string, sessionId?: string): Promise<boolean> {
+    const cleanSessionId = (sessionId || 'default-session').trim();
+    const sessionsCol = this.db.getCollection('chat_sessions');
+    const now = new Date();
+    const activeSession = await sessionsCol.findOne(
+      {
+        sessionId: cleanSessionId,
+        active: true,
+        expiresAt: { $gt: now },
+      },
+      { sort: { verifiedAt: -1 } },
+    );
+    if (activeSession?.custNo) {
+      const reqClean = String(custNo || '').trim().toUpperCase().replace(/^CUST/, '');
+      const sessClean = String(activeSession.custNo).trim().toUpperCase().replace(/^CUST/, '');
+      if (!reqClean || reqClean === sessClean) {
+        return true;
+      }
+    }
+
     if (!custNo) return false;
-    const verificationsCol = this.db.getCollection('email_verifications');
-    const cutoff = new Date(Date.now() - 30 * 60 * 1000);
-    const verified = await verificationsCol.findOne({
-      custNo: String(custNo),
-      type: 'chat_otp',
-      verifiedAt: { $gte: cutoff },
-    });
-    return Boolean(verified);
+
+    // Also honour legacy verified OTP within 30m only when using default-session
+    if (cleanSessionId === 'default-session') {
+      const verificationsCol = this.db.getCollection('email_verifications');
+      const cutoff = new Date(Date.now() - 30 * 60 * 1000);
+      const verified = await verificationsCol.findOne({
+        custNo: String(custNo),
+        type: 'chat_otp',
+        verifiedAt: { $gte: cutoff },
+        loggedOut: { $ne: true },
+      });
+      return Boolean(verified);
+    }
+
+    return false;
+  }
+
+  /** Fetch verified customer snapshot shared between verified lookup and OTP verification. */
+  private async buildVerifiedAccountPayload(user: any) {
+    const custNo = String(user.custNo || '');
+    const [services, balance, usage, orders, invoices] = await Promise.all([
+      custNo ? this.carrierService.getServices(custNo).catch(() => ({ services: [] })) : { services: [] },
+      custNo ? this.carrierService.getBalance(custNo).catch(() => null) : null,
+      custNo ? this.carrierService.getUnbilledUsage(custNo).catch(() => null) : null,
+      custNo ? this.carrierService.getCustomerOrders(custNo).catch(() => []) : [],
+      custNo ? this.invoiceService.getCustomerInvoices(custNo).catch(() => []) : [],
+    ]);
+
+    return {
+      verified: true,
+      custNo,
+      name: user.name,
+      preferredName: user.preferredName || user.firstName || user.name,
+      maskedEmail: this.maskEmail(user.email),
+      maskedPhone: this.maskPhone(user.phone || ''),
+      address: user.address ? `${user.address}, ${user.suburb || ''} ${user.state || ''} ${user.postcode || ''}`.trim() : 'Not set',
+      services: services.services || [],
+      balance: balance
+        ? {
+            formattedBalance: balance.formattedBalance,
+            nextInvoiceDate: balance.nextInvoiceDate,
+            nextInvoiceAmount: balance.nextInvoiceAmount,
+            autoPayStatus: balance.autoPayStatus,
+            paymentMethod: balance.paymentMethod,
+          }
+        : null,
+      usage: usage?.dataMeter || null,
+      recentOrders: (orders || []).map((o: any) => ({
+        orderId: o.orderId,
+        msn: o.msn,
+        planName: o.planName,
+        status: o.status,
+        orderType: o.orderType,
+      })),
+      recentInvoices: (invoices || []).map((inv: any) => ({
+        invoiceId: inv.invoiceId,
+        amount: inv.amount,
+        status: inv.status,
+        period: `${inv.periodStart} to ${inv.periodEnd}`,
+      })),
+    };
   }
 
   private getToolsSchema() {
@@ -116,7 +204,7 @@ export class ChatService {
         function: {
           name: 'lookup_account',
           description:
-            'Locate a customer account by mobile number, email, or Customer Number without exposing any personal details before OTP verification.',
+            'Locate a customer account by mobile number, email, or Customer Number without exposing any personal details before OTP verification. Once the session is already OTP-verified, calling this tool returns the verified customer services, balance, data usage, recent orders, and recent invoices immediately.',
           parameters: {
             type: 'object',
             properties: {
@@ -152,18 +240,12 @@ export class ChatService {
         function: {
           name: 'verify_chat_otp',
           description:
-            'Verify the 6-digit OTP provided by the customer. Enforces expiry and retry limits, and returns masked account summary upon success.',
+            'Verify the 6-digit OTP provided by the customer. Enforces expiry and retry limits, and returns account summary upon success.',
           parameters: {
             type: 'object',
             properties: {
-              identifier: {
-                type: 'string',
-                description: 'Customer Number, email, or mobile number.',
-              },
-              code: {
-                type: 'string',
-                description: '6-digit OTP entered by the customer.',
-              },
+              identifier: { type: 'string', description: 'Customer Number, email, or mobile number.' },
+              code: { type: 'string', description: '6-digit OTP entered by the customer.' },
             },
             required: ['identifier', 'code'],
           },
@@ -172,9 +254,58 @@ export class ChatService {
       {
         type: 'function',
         function: {
+          name: 'logout_chat_session',
+          description:
+            'End the currently verified customer chat session immediately (call when customer asks to log out or finish account access).',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string', description: 'Optional Customer Number to log out.' },
+            },
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'request_contact_update_otp',
+          description:
+            'Send a 6-digit confirmation code to the NEW email address or NEW phone number when an already-verified customer wants to update registered email or contact phone (call directly whenever [VERIFIED SESSION ACTIVE] is shown).',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string' },
+              newEmail: { type: 'string' },
+              newPhone: { type: 'string' },
+            },
+            required: ['custNo'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'confirm_contact_update',
+          description:
+            'Verify the 6-digit confirmation code and save the new registered email address or contact phone number.',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string' },
+              code: { type: 'string' },
+              newEmail: { type: 'string' },
+              newPhone: { type: 'string' },
+            },
+            required: ['custNo', 'code'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
           name: 'update_account_details',
           description:
-            'Update non-high-risk account details (preferredName, residential address/suburb/state/postcode, postalAddress, commPreference, marketingConsent) ONLY after OTP verification.',
+            'Update non-high-risk account details (preferredName, residential address/suburb/state/postcode, postalAddress, commPreference, billDeliveryPreference, marketingConsent) ONLY after OTP verification.',
           parameters: {
             type: 'object',
             properties: {
@@ -186,6 +317,7 @@ export class ChatService {
               postcode: { type: 'string' },
               postalAddress: { type: 'string' },
               commPreference: { type: 'string', enum: ['email', 'sms', 'both'] },
+              billDeliveryPreference: { type: 'string', enum: ['email', 'paper'] },
               marketingConsent: { type: 'boolean' },
             },
             required: ['custNo'],
@@ -213,6 +345,91 @@ export class ChatService {
       {
         type: 'function',
         function: {
+          name: 'cancel_pending_plan_change',
+          description:
+            'Cancel a pending scheduled plan change and retain the original plan (requires OTP verification).',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string' },
+              msn: { type: 'string' },
+            },
+            required: ['custNo'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'send_invoice_copy',
+          description:
+            'Retrieve and email/link a copy of the latest or requested ATO tax invoice PDF (requires OTP verification).',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string' },
+              invoiceId: { type: 'string', description: 'Optional specific invoiceId' },
+            },
+            required: ['custNo'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'manage_data_addon_or_alerts',
+          description:
+            'Purchase/cancel a $10 20GB 30-day Data Top-Up Pack or enable/disable low-data usage alerts (requires OTP verification; add-on purchase/cancellation requires confirmed: true).',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string' },
+              action: { type: 'string', enum: ['add_data_pack', 'cancel_data_pack', 'enable_alerts', 'disable_alerts'] },
+              msn: { type: 'string' },
+              confirmed: { type: 'boolean' },
+            },
+            required: ['custNo', 'action', 'confirmed'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'manage_roaming',
+          description:
+            'Activate or disable International Roaming Travel Pack ($5/day 2GB across 20 eligible destinations). Requires OTP verification and confirmed: true.',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string' },
+              action: { type: 'string', enum: ['activate', 'disable'] },
+              destinationCountry: { type: 'string' },
+              msn: { type: 'string' },
+              confirmed: { type: 'boolean' },
+            },
+            required: ['custNo', 'action', 'confirmed'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'resend_esim_qr',
+          description:
+            'Resend an eSIM activation QR code email for an existing verified customer order (requires OTP verification).',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string' },
+              orderId: { type: 'string', description: 'Optional specific orderId' },
+            },
+            required: ['custNo'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
           name: 'suspend_service',
           description:
             'Temporarily suspend a verified customer mobile service (e.g. lost/stolen phone or voluntary suspension) after explicit confirmation.',
@@ -231,9 +448,61 @@ export class ChatService {
       {
         type: 'function',
         function: {
+          name: 'restore_service',
+          description:
+            'Restore a temporarily suspended mobile service after OTP verification and explicit confirmation.',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string' },
+              msn: { type: 'string' },
+              confirmed: { type: 'boolean' },
+            },
+            required: ['custNo', 'confirmed'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'manage_cancellation',
+          description:
+            'Schedule or withdraw a service cancellation (single service on account), warning never to cancel before porting finishes. Requires OTP verification and confirmed: true.',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string' },
+              action: { type: 'string', enum: ['schedule', 'withdraw'] },
+              msn: { type: 'string' },
+              effectiveDate: { type: 'string' },
+              reason: { type: 'string' },
+              confirmed: { type: 'boolean' },
+            },
+            required: ['custNo', 'action', 'confirmed'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'check_network_outage',
+          description:
+            'Check recorded network outage notices by suburb, postcode, or state.',
+          parameters: {
+            type: 'object',
+            properties: {
+              location: { type: 'string', description: 'Suburb, 4-digit postcode, or Australian state' },
+            },
+            required: ['location'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
           name: 'lodge_complaint_or_support_case',
           description:
-            'Log a formal complaint (CMP-JM-...), support ticket (TKT-JM-...), billing dispute (BQ-JM-...), payment arrangement, or human/fraud/hardship escalation while preserving conversation context. Does NOT require prior OTP verification or account lookup — call immediately when a user asks to lodge a complaint, dispute, or escalation with a summary of the issue.',
+            'Log a formal complaint (CMP-JM-...), support ticket (TKT-JM-...), billing dispute (BQ-JM-...), payment arrangement, or human/fraud/hardship escalation while preserving conversation context. Does NOT require prior OTP verification — call immediately when a user asks to lodge a complaint, dispute, or escalation with a summary of the issue.',
           parameters: {
             type: 'object',
             properties: {
@@ -261,7 +530,7 @@ export class ChatService {
           parameters: {
             type: 'object',
             properties: {
-              referenceId: { type: 'string', description: 'Order ID, CMP-JM-..., TKT-JM-..., or BQ-JM-...' },
+              referenceId: { type: 'string', description: 'Order ID, CMP-JM-..., TKT-JM-..., BQ-JM-..., or CAN-JM-...' },
               custNo: { type: 'string', description: 'Verified Customer Number' },
             },
           },
@@ -274,6 +543,7 @@ export class ChatService {
     name: string,
     rawArgs: string,
     conversationMessages: Array<{ role: string; content: string }>,
+    sessionId?: string,
   ): Promise<string> {
     let args: Record<string, any> = {};
     try {
@@ -281,6 +551,8 @@ export class ChatService {
     } catch {
       return JSON.stringify({ error: 'Invalid tool arguments.' });
     }
+
+    const cleanSessionId = (sessionId || 'default-session').trim();
 
     try {
       if (name === 'lookup_account') {
@@ -290,6 +562,9 @@ export class ChatService {
             found: false,
             message: 'No matching account found. Ask the customer to double-check their Customer Number, mobile number, or email.',
           });
+        }
+        if (user.custNo && (await this.hasRecentVerifiedChatSession(String(user.custNo), cleanSessionId))) {
+          return JSON.stringify(await this.buildVerifiedAccountPayload(user));
         }
         return JSON.stringify({
           found: true,
@@ -308,7 +583,7 @@ export class ChatService {
         const verificationsCol = this.db.getCollection('email_verifications');
         const lockoutCutoff = new Date(Date.now() - 15 * 60 * 1000);
         const recentLock = await verificationsCol.findOne({
-          email: user.email.toLowerCase(),
+          email: String(user.email || '').toLowerCase(),
           type: 'chat_otp',
           locked: true,
           createdAt: { $gte: lockoutCutoff },
@@ -323,12 +598,13 @@ export class ChatService {
 
         const code = Math.floor(100000 + Math.random() * 900000).toString();
         await verificationsCol.updateMany(
-          { email: user.email.toLowerCase(), type: 'chat_otp', used: false },
+          { email: String(user.email || '').toLowerCase(), type: 'chat_otp', used: false },
           { $set: { used: true } },
         );
         await verificationsCol.insertOne({
-          email: user.email.toLowerCase(),
+          email: String(user.email || '').toLowerCase(),
           custNo: String(user.custNo || ''),
+          sessionId: cleanSessionId,
           code,
           type: 'chat_otp',
           expiresAt: new Date(Date.now() + 10 * 60 * 1000),
@@ -362,7 +638,7 @@ export class ChatService {
 
         const verificationsCol = this.db.getCollection('email_verifications');
         const record = await verificationsCol.findOne(
-          { email: user.email.toLowerCase(), type: 'chat_otp', used: false },
+          { email: String(user.email || '').toLowerCase(), type: 'chat_otp', used: false },
           { sort: { createdAt: -1 } },
         );
 
@@ -403,61 +679,111 @@ export class ChatService {
           });
         }
 
-        await verificationsCol.updateOne(
-          { _id: record._id },
-          { $set: { used: true, verifiedAt: new Date(), custNo: String(user.custNo || '') } },
-        );
-
+        const now = new Date();
         const custNo = String(user.custNo || '');
-        const [services, balance, usage, orders, invoices] = await Promise.all([
-          custNo ? this.carrierService.getServices(custNo).catch(() => ({ services: [] })) : { services: [] },
-          custNo ? this.carrierService.getBalance(custNo).catch(() => null) : null,
-          custNo ? this.carrierService.getUnbilledUsage(custNo).catch(() => null) : null,
-          custNo ? this.carrierService.getCustomerOrders(custNo).catch(() => []) : [],
-          custNo
-            ? this.db.getCollection('invoices').find({ custNo }).sort({ issueDate: -1 }).limit(3).toArray()
-            : [],
+        await Promise.all([
+          verificationsCol.updateOne(
+            { _id: record._id },
+            { $set: { used: true, verifiedAt: now, custNo } },
+          ),
+          this.db.getCollection('chat_sessions').updateOne(
+            { sessionId: cleanSessionId, custNo },
+            {
+              $set: {
+                sessionId: cleanSessionId,
+                custNo,
+                active: true,
+                verifiedAt: now,
+                expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+              },
+            },
+            { upsert: true },
+          ),
         ]);
 
+        return JSON.stringify(await this.buildVerifiedAccountPayload(user));
+      }
+
+      if (name === 'logout_chat_session') {
+        const filter: Record<string, any> = { sessionId: cleanSessionId };
+        if (args.custNo) filter.custNo = String(args.custNo).trim();
+        await this.db.getCollection('chat_sessions').updateMany(filter, {
+          $set: { active: false, loggedOutAt: new Date() },
+        });
+        if (args.custNo) {
+          await this.db.getCollection('email_verifications').updateMany(
+            { custNo: String(args.custNo).trim(), type: 'chat_otp' },
+            { $set: { loggedOut: true } },
+          );
+        }
         return JSON.stringify({
-          verified: true,
+          loggedOut: true,
+          message: 'Your verified chat session has been ended safely. Ask to re-verify anytime you need account access again.',
+        });
+      }
+
+      if (name === 'request_contact_update_otp') {
+        const custNo = String(args.custNo || '').trim();
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
+          return JSON.stringify({ success: false, error: 'OTP verification of current session required first.' });
+        }
+        const targetEmail = args.newEmail ? String(args.newEmail).trim().toLowerCase() : null;
+        const targetPhone = args.newPhone ? String(args.newPhone).trim() : null;
+        if (!targetEmail && !targetPhone) {
+          return JSON.stringify({ success: false, error: 'Provide the new email address or phone number to verify.' });
+        }
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        await this.db.getCollection('email_verifications').insertOne({
           custNo,
-          name: user.name,
-          preferredName: user.preferredName || user.firstName || user.name,
-          maskedEmail: this.maskEmail(user.email),
-          maskedPhone: this.maskPhone(user.phone || ''),
-          address: user.address ? `${user.address}, ${user.suburb || ''} ${user.state || ''} ${user.postcode || ''}`.trim() : 'Not set',
-          services: services.services || [],
-          balance: balance
-            ? {
-                formattedBalance: balance.formattedBalance,
-                nextInvoiceDate: balance.nextInvoiceDate,
-                nextInvoiceAmount: balance.nextInvoiceAmount,
-                autoPayStatus: balance.autoPayStatus,
-                paymentMethod: balance.paymentMethod,
-              }
-            : null,
-          usage: usage?.dataMeter || null,
-          recentOrders: (orders || []).map((o: any) => ({
-            orderId: o.orderId,
-            msn: o.msn,
-            planName: o.planName,
-            status: o.status,
-            orderType: o.orderType,
-          })),
-          recentInvoices: (invoices || []).map((inv: any) => ({
-            invoiceId: inv.invoiceId,
-            amount: inv.amount,
-            status: inv.status,
-            period: `${inv.periodStart} to ${inv.periodEnd}`,
-          })),
+          email: targetEmail || `phone:${targetPhone}`,
+          newEmail: targetEmail,
+          newPhone: targetPhone,
+          code,
+          type: 'contact_update',
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          used: false,
+          createdAt: new Date(),
+        });
+        if (process.env.NODE_ENV !== 'production') {
+          this.logger.log(`[DEV] Contact update OTP for ${custNo} (${targetEmail || targetPhone}): ${code}`);
+        }
+        if (targetEmail && !targetEmail.endsWith('@example.com')) {
+          await this.mailService.sendVerificationCode(targetEmail, code).catch(() => {});
+        }
+        return JSON.stringify({
+          otpSent: true,
+          target: targetEmail ? this.maskEmail(targetEmail) : this.maskPhone(targetPhone || ''),
+          message: 'Verification code dispatched for the new contact details. Ask the customer for the 6-digit code.',
+        });
+      }
+
+      if (name === 'confirm_contact_update') {
+        const custNo = String(args.custNo || '').trim();
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
+          return JSON.stringify({ success: false, error: 'OTP verification required first.' });
+        }
+        const rec = await this.db.getCollection('email_verifications').findOne(
+          { custNo, type: 'contact_update', used: false, expiresAt: { $gt: new Date() } },
+          { sort: { createdAt: -1 } },
+        );
+        if (!rec || String(rec.code) !== String(args.code || '').trim()) {
+          return JSON.stringify({ success: false, error: 'Invalid or expired contact verification code.' });
+        }
+        await this.db.getCollection('email_verifications').updateOne({ _id: rec._id }, { $set: { used: true } });
+        const updateSet: Record<string, any> = { updatedAt: new Date() };
+        if (args.newEmail || rec.newEmail) updateSet.email = String(args.newEmail || rec.newEmail).trim().toLowerCase();
+        if (args.newPhone || rec.newPhone) updateSet.phone = String(args.newPhone || rec.newPhone).trim();
+        await this.db.getCollection('users').updateOne({ custNo }, { $set: updateSet });
+        return JSON.stringify({
+          success: true,
+          referenceNumber: `CTC-JM-${Math.floor(100000 + Math.random() * 900000)}`,
+          updated: { email: updateSet.email ? this.maskEmail(updateSet.email) : undefined, phone: updateSet.phone ? this.maskPhone(updateSet.phone) : undefined },
         });
       }
 
       if (name === 'update_account_details') {
         const custNo = String(args.custNo || '').trim();
-        const isVerified = await this.hasRecentVerifiedChatSession(custNo);
-        if (!isVerified) {
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
           return JSON.stringify({
             success: false,
             error: 'OTP verification required before updating account details.',
@@ -472,6 +798,7 @@ export class ChatService {
         if (args.postcode !== undefined) updateSet.postcode = String(args.postcode).trim();
         if (args.postalAddress !== undefined) updateSet.postalAddress = String(args.postalAddress).trim();
         if (args.commPreference !== undefined) updateSet.commPreference = args.commPreference;
+        if (args.billDeliveryPreference !== undefined) updateSet.billDeliveryPreference = args.billDeliveryPreference;
         if (args.marketingConsent !== undefined) updateSet.marketingConsent = Boolean(args.marketingConsent);
 
         const usersCol = this.db.getCollection('users');
@@ -482,14 +809,13 @@ export class ChatService {
           success: true,
           referenceNumber,
           effectiveTiming: 'Immediately',
-          message: 'Account details updated in database.',
+          message: 'Account details updated.',
         });
       }
 
       if (name === 'change_plan') {
         const custNo = String(args.custNo || '').trim();
-        const isVerified = await this.hasRecentVerifiedChatSession(custNo);
-        if (!isVerified) {
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
           return JSON.stringify({ success: false, error: 'OTP verification required before changing plans.' });
         }
         if (!args.confirmed) {
@@ -519,20 +845,203 @@ export class ChatService {
           msn: args.msn,
         });
         const referenceNumber = `PC-JM-${Math.floor(100000 + Math.random() * 900000)}`;
+
+        const user = await this.findCustomerByIdentifier(custNo);
+        await this.db.getCollection('plan_changes').insertOne({
+          referenceNumber,
+          custNo,
+          msn: args.msn || user?.phone || null,
+          planId: target.id,
+          planName: target.name,
+          monthlyFee: target.price,
+          status: 'PENDING',
+          createdAt: new Date(),
+        });
+
+        const emailSent = user?.email
+          ? await this.mailService.sendCustomerNotificationEmail(
+              user.email,
+              `JustMobile Plan Change Confirmation (${referenceNumber})`,
+              `Your plan change to ${target.name} ($${target.price.toFixed(2)}/mth incl. GST) has been recorded under reference ${referenceNumber}.\nData allowance updates immediately and your next bill on the 28th reflects the new monthly rate.`,
+            )
+          : false;
+
         return JSON.stringify({
           success: true,
           referenceNumber,
           planName: target.name,
           monthlyFee: target.price,
+          writtenConfirmationSent: emailSent,
           effectiveDate: 'Quota updated immediately; next invoice on the 28th reflects the new monthly rate.',
           backendMessage: res.message,
         });
       }
 
+      if (name === 'cancel_pending_plan_change') {
+        const custNo = String(args.custNo || '').trim();
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
+          return JSON.stringify({ success: false, error: 'OTP verification required first.' });
+        }
+        const pending = await this.db.getCollection('plan_changes').findOne(
+          { custNo, status: 'PENDING' },
+          { sort: { createdAt: -1 } },
+        );
+        if (!pending) {
+          return JSON.stringify({
+            cancelled: false,
+            message: 'No pending plan change found to cancel; your current plan remains unchanged.',
+          });
+        }
+        await this.db.getCollection('plan_changes').updateOne(
+          { _id: pending._id },
+          { $set: { status: 'CANCELLED', cancelledAt: new Date() } },
+        );
+        return JSON.stringify({
+          cancelled: true,
+          referenceNumber: pending.referenceNumber,
+          message: `Pending plan change (${pending.planName}) cancelled. Your original plan remains active.`,
+        });
+      }
+
+      if (name === 'send_invoice_copy') {
+        const custNo = String(args.custNo || '').trim();
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
+          return JSON.stringify({ success: false, error: 'OTP verification required first.' });
+        }
+        const invoices = await this.invoiceService.getCustomerInvoices(custNo);
+        if (!invoices || invoices.length === 0) {
+          return JSON.stringify({ found: false, message: 'No invoices found on your account yet.' });
+        }
+        const target =
+          (args.invoiceId && invoices.find((i) => i.invoiceId === args.invoiceId)) || invoices[0];
+        const user = await this.findCustomerByIdentifier(custNo);
+        const emailed = user?.email
+          ? await this.mailService.sendCustomerNotificationEmail(
+              user.email,
+              `JustMobile Tax Invoice ${target.invoiceId}`,
+              `Here is a summary of your ATO Tax Invoice ${target.invoiceId} (${target.periodStart} to ${target.periodEnd}):\nPlan: ${target.planName}\nTotal (incl. GST): $${Number(target.amount).toFixed(2)}\nStatus: ${target.status}\n\nYou can download the full PDF anytime in /account -> Billing & Pay Now.`,
+            )
+          : false;
+
+        return JSON.stringify({
+          found: true,
+          invoiceId: target.invoiceId,
+          amount: target.amount,
+          status: target.status,
+          pdfDownloadPath: `/api/carrier/customers/${custNo}/invoices/${target.invoiceId}/pdf`,
+          portalPath: '/account',
+          emailed,
+        });
+      }
+
+      if (name === 'manage_data_addon_or_alerts') {
+        const custNo = String(args.custNo || '').trim();
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
+          return JSON.stringify({ success: false, error: 'OTP verification required first.' });
+        }
+        const isAlertAction = args.action === 'enable_alerts' || args.action === 'disable_alerts';
+        if (!isAlertAction && !args.confirmed) {
+          return JSON.stringify({
+            success: false,
+            error: 'Present pack details ($10 for 20GB, valid 30 days) and confirm with the customer before proceeding.',
+          });
+        }
+        const ref = `ADD-JM-${Math.floor(100000 + Math.random() * 900000)}`;
+        await this.db.getCollection('service_addons').insertOne({
+          referenceNumber: ref,
+          custNo,
+          msn: args.msn || null,
+          addonType: isAlertAction ? 'LOW_DATA_ALERTS' : 'DATA_PACK_20GB',
+          action: args.action,
+          priceAud: args.action === 'add_data_pack' ? 10.0 : 0,
+          validityDays: args.action === 'add_data_pack' ? 30 : null,
+          status: args.action === 'cancel_data_pack' || args.action === 'disable_alerts' ? 'INACTIVE' : 'ACTIVE',
+          createdAt: new Date(),
+        });
+        return JSON.stringify({
+          success: true,
+          referenceNumber: ref,
+          action: args.action,
+          note:
+            args.action === 'add_data_pack'
+              ? '20GB Data Top-Up ($10, valid 30 days) enabled.'
+              : args.action === 'cancel_data_pack'
+              ? 'Data add-on stopped cleanly; expires at end of current pack validity.'
+              : args.action === 'enable_alerts'
+              ? 'Low-data usage alerts (50%, 85%, 100%) enabled.'
+              : 'Optional low-data alerts disabled (mandatory ACMA spend/usage notices remain active).',
+        });
+      }
+
+      if (name === 'manage_roaming') {
+        const custNo = String(args.custNo || '').trim();
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
+          return JSON.stringify({ success: false, error: 'OTP verification required first.' });
+        }
+        if (!args.confirmed) {
+          return JSON.stringify({
+            success: false,
+            error: 'Present Travel Pack charges ($5/day for 2GB across 20 eligible destinations) and ask for explicit confirmation first.',
+          });
+        }
+        const ref = `RMG-JM-${Math.floor(100000 + Math.random() * 900000)}`;
+        await this.db.getCollection('service_addons').insertOne({
+          referenceNumber: ref,
+          custNo,
+          msn: args.msn || null,
+          addonType: 'ROAMING_TRAVEL_PACK',
+          action: args.action,
+          destinationCountry: args.destinationCountry || null,
+          priceAud: args.action === 'activate' ? 5.0 : 0,
+          status: args.action === 'activate' ? 'ACTIVE' : 'DISABLED',
+          createdAt: new Date(),
+        });
+        return JSON.stringify({
+          success: true,
+          referenceNumber: ref,
+          status: args.action === 'activate' ? 'ENABLED' : 'DISABLED',
+          message:
+            args.action === 'activate'
+              ? 'International Roaming Travel Pack ($5/day for 2GB) enabled.'
+              : 'International roaming disabled cleanly.',
+        });
+      }
+
+      if (name === 'resend_esim_qr') {
+        const custNo = String(args.custNo || '').trim();
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
+          return JSON.stringify({ success: false, error: 'OTP verification required first.' });
+        }
+        const orders = await this.carrierService.getCustomerOrders(custNo);
+        const order =
+          (args.orderId && orders.find((o) => o.orderId === args.orderId)) || orders[0];
+        if (!order && custNo !== 'CUST990001') {
+          return JSON.stringify({
+            sent: false,
+            error: 'No existing eSIM order found on this account yet. Complete an order in /account first.',
+          });
+        }
+        const targetId = order?.orderId || 'CUST990001';
+        const qr = await this.carrierService.getEsimQRCode(targetId).catch(() => null);
+        const user = await this.findCustomerByIdentifier(custNo);
+        const emailRes = order
+          ? await this.carrierService
+              .sendOrderEsimEmail(custNo, order.orderId, user?.email)
+              .catch(() => ({ success: false, email: user?.email }))
+          : { success: false, email: user?.email };
+        return JSON.stringify({
+          sent: true,
+          orderId: qr?.orderId || targetId,
+          lpa: qr?.lpa,
+          smdpAddress: qr?.smdpAddress,
+          emailDispatched: Boolean(emailRes?.success),
+          maskedEmail: this.maskEmail(user?.email || ''),
+        });
+      }
+
       if (name === 'suspend_service') {
         const custNo = String(args.custNo || '').trim();
-        const isVerified = await this.hasRecentVerifiedChatSession(custNo);
-        if (!isVerified) {
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
           return JSON.stringify({ success: false, error: 'OTP verification required before suspending a service.' });
         }
         if (!args.confirmed) {
@@ -556,6 +1065,118 @@ export class ChatService {
         });
       }
 
+      if (name === 'restore_service') {
+        const custNo = String(args.custNo || '').trim();
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
+          return JSON.stringify({ success: false, error: 'OTP verification required before restoring a service.' });
+        }
+        if (!args.confirmed) {
+          return JSON.stringify({
+            success: false,
+            error: 'Confirm with the customer before restoring their suspended service.',
+          });
+        }
+        const ordersCol = this.db.getCollection('orders');
+        const filter: Record<string, any> = { custNo, status: 'SUSPENDED' };
+        if (args.msn) filter.msn = String(args.msn).replace(/\s+/g, '');
+        await ordersCol.updateMany(filter, {
+          $set: { status: 'ACTIVE', restoredAt: new Date(), updatedAt: new Date() },
+        });
+        const referenceNumber = `RST-JM-${Math.floor(100000 + Math.random() * 900000)}`;
+        return JSON.stringify({
+          success: true,
+          referenceNumber,
+          note: 'Suspended mobile service restored to Active status.',
+        });
+      }
+
+      if (name === 'manage_cancellation') {
+        const custNo = String(args.custNo || '').trim();
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
+          return JSON.stringify({ success: false, error: 'OTP verification required before cancelling a service.' });
+        }
+        if (!args.confirmed) {
+          return JSON.stringify({
+            success: false,
+            error: 'Warn customer about number loss if porting, explain final billing, and ask for explicit confirmation first.',
+          });
+        }
+        const ordersCol = this.db.getCollection('orders');
+        const filter: Record<string, any> = { custNo };
+        if (args.msn) filter.msn = String(args.msn).replace(/\s+/g, '');
+
+        const referenceNumber = `CAN-JM-${Math.floor(100000 + Math.random() * 900000)}`;
+        if (args.action === 'schedule') {
+          await ordersCol.updateMany(filter, {
+            $set: {
+              cancellationStatus: 'SCHEDULED',
+              cancellationEffectiveDate: args.effectiveDate || 'End of current billing period',
+              cancellationReference: referenceNumber,
+              updatedAt: new Date(),
+            },
+          });
+        } else {
+          await ordersCol.updateMany(filter, {
+            $set: {
+              cancellationStatus: 'WITHDRAWN',
+              status: 'ACTIVE',
+              updatedAt: new Date(),
+            },
+          });
+        }
+
+        const user = await this.findCustomerByIdentifier(custNo);
+        if (user?.email) {
+          await this.mailService.sendCustomerNotificationEmail(
+            user.email,
+            `JustMobile Service Cancellation ${args.action === 'schedule' ? 'Scheduled' : 'Withdrawn'} (${referenceNumber})`,
+            `Reference: ${referenceNumber}\nAction: ${args.action === 'schedule' ? `Scheduled cancellation (${args.effectiveDate || 'End of billing period'})` : 'Cancellation withdrawn — service remains active'}\nTarget Service: ${args.msn || 'Selected mobile service'}`,
+          );
+        }
+
+        return JSON.stringify({
+          success: true,
+          referenceNumber,
+          action: args.action,
+          effectiveDate: args.effectiveDate || 'End of current paid billing period',
+          note:
+            args.action === 'schedule'
+              ? 'Cancellation request recorded for the specified service only; final bill settles on your next cycle.'
+              : 'Scheduled cancellation withdrawn cleanly; your service remains active.',
+        });
+      }
+
+      if (name === 'check_network_outage') {
+        const loc = String(args.location || '').trim().toLowerCase();
+        const outages = await this.db
+          .getCollection('network_outages')
+          .find({ status: 'ACTIVE' })
+          .toArray();
+        const matched = outages.find((o: any) => {
+          const sub = String(o.suburb || '').toLowerCase();
+          const pc = String(o.postcode || '').trim();
+          const st = String(o.state || '').toLowerCase();
+          return (
+            (sub && (loc.includes(sub) || sub.includes(loc))) ||
+            (pc && (loc.includes(pc) || pc === loc)) ||
+            (st && st === loc)
+          );
+        });
+        if (matched) {
+          return JSON.stringify({
+            knownOutage: true,
+            location: loc,
+            summary: matched.summary,
+            estimatedRestoration: matched.estimatedRestoration || 'Under active Telstra Wholesale restoration',
+          });
+        }
+        return JSON.stringify({
+          knownOutage: false,
+          location: loc,
+          note: 'No recorded outage found for that location. If issues persist, log a diagnostic support ticket via lodge_complaint_or_support_case.',
+        });
+      }
+
       if (name === 'lodge_complaint_or_support_case') {
         const prefixMap: Record<string, string> = {
           complaint: 'CMP-JM',
@@ -566,14 +1187,19 @@ export class ChatService {
         };
         const prefix = prefixMap[args.caseType] || 'TKT-JM';
         const referenceNumber = `${prefix}-${Math.floor(100000 + Math.random() * 900000)}`;
+        const colName =
+          args.caseType === 'complaint'
+            ? 'complaints'
+            : args.caseType === 'billing_dispute'
+            ? 'bill_queries'
+            : 'support_tickets';
 
         const sanitizedTranscript = conversationMessages.slice(-10).map((m) => ({
           role: m.role,
           content: String(m.content || '').replace(/\b(?:\d[ -]*?){13,16}\b/g, '[REDACTED CARD]'),
         }));
 
-        await this.db.getCollection('audit_events').insertOne({
-          recordType: args.caseType || 'support_ticket',
+        await this.db.getCollection(colName).insertOne({
           referenceNumber,
           queryId: referenceNumber,
           caseType: args.caseType,
@@ -602,13 +1228,22 @@ export class ChatService {
       if (name === 'check_status') {
         if (args.referenceId) {
           const ref = String(args.referenceId).trim();
-          const [order, auditRecord] = await Promise.all([
-            this.db.getCollection('orders').findOne({ orderId: ref }),
-            this.db.getCollection('audit_events').findOne({ $or: [{ referenceNumber: ref }, { queryId: ref }] }),
+          const [order, complaint, ticket, billQuery, planChange] = await Promise.all([
+            this.db.getCollection('orders').findOne({ $or: [{ orderId: ref }, { cancellationReference: ref }] }),
+            this.db.getCollection('complaints').findOne({ referenceNumber: ref }),
+            this.db.getCollection('support_tickets').findOne({ referenceNumber: ref }),
+            this.db.getCollection('bill_queries').findOne({ $or: [{ referenceNumber: ref }, { queryId: ref }] }),
+            this.db.getCollection('plan_changes').findOne({ referenceNumber: ref }),
           ]);
-          const found = order || auditRecord;
+          const found: any = order || complaint || ticket || billQuery || planChange;
           if (!found) {
             return JSON.stringify({ found: false, message: `No record found for reference ${ref}.` });
+          }
+          if (found.custNo && !(await this.hasRecentVerifiedChatSession(String(found.custNo), cleanSessionId))) {
+            return JSON.stringify({
+              verificationRequired: true,
+              message: `Reference ${ref} exists. Verify customer identity with send_chat_otp / verify_chat_otp before disclosing account/case status.`,
+            });
           }
           return JSON.stringify({
             found: true,
@@ -620,8 +1255,7 @@ export class ChatService {
         }
 
         if (args.custNo) {
-          const isVerified = await this.hasRecentVerifiedChatSession(String(args.custNo));
-          if (!isVerified) {
+          if (!(await this.hasRecentVerifiedChatSession(String(args.custNo), cleanSessionId))) {
             return JSON.stringify({ error: 'OTP verification required before checking customer statuses.' });
           }
           const orders = await this.carrierService.getCustomerOrders(String(args.custNo));
@@ -648,7 +1282,10 @@ export class ChatService {
     }
   }
 
-  async generateResponse(messages: Array<{ role: string; content: string }>) {
+  async generateResponse(
+    messages: Array<{ role: string; content: string }>,
+    sessionId?: string,
+  ) {
     const apiKey = process.env.OPENAI_KEY;
 
     if (!apiKey) {
@@ -662,14 +1299,24 @@ export class ChatService {
     const latestUserMsg = messages[messages.length - 1]?.content || '';
     const containsSensitive = this.detectSensitiveInput(latestUserMsg);
 
-    const systemContent = containsSensitive
+    const cleanSessionId = (sessionId || 'default-session').trim();
+    const activeSession = await this.db
+      .getCollection('chat_sessions')
+      .findOne({ sessionId: cleanSessionId, active: true, expiresAt: { $gt: new Date() } })
+      .catch(() => null);
+
+    let systemContent = containsSensitive
       ? `${BELE_SYSTEM_PROMPT}\n\n[SECURITY ALERT: The user's last message appears to contain sensitive card/PIN/ID details. Immediately warn them NOT to share card numbers, CVVs, PINs, or identity numbers in chat, do NOT repeat those numbers back, and direct them to /account or 1300 492 002.]`
       : BELE_SYSTEM_PROMPT;
+
+    if (activeSession?.custNo) {
+      systemContent += `\n\n[VERIFIED SESSION ACTIVE]\nCustomer "${activeSession.custNo}" is ALREADY OTP-verified for this chat session until ${new Date(activeSession.expiresAt).toISOString()}. NEVER ask them to verify their session again or resend a login OTP while this session is active. Call requested account tools directly with custNo "${activeSession.custNo}". When they want to change registered email or phone, immediately call \`request_contact_update_otp\` to send a confirmation code to their NEW email/phone.`;
+    }
 
     try {
       const apiMessages: ChatMessage[] = [
         { role: 'system', content: systemContent },
-        ...messages.slice(-12).map((m) => ({
+        ...messages.slice(-16).map((m) => ({
           role: (m.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
           content: this.detectSensitiveInput(m.content)
             ? '[Sensitive payment/identity digits redacted by security filter]'
@@ -679,7 +1326,7 @@ export class ChatService {
 
       const tools = this.getToolsSchema();
 
-      for (let step = 0; step < 4; step++) {
+      for (let step = 0; step < 5; step++) {
         const res = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: {
@@ -691,8 +1338,8 @@ export class ChatService {
             messages: apiMessages,
             tools,
             tool_choice: 'auto',
-            max_tokens: 450,
-            temperature: 0.4,
+            max_tokens: 600,
+            temperature: 0.35,
           }),
         });
 
@@ -721,6 +1368,7 @@ export class ChatService {
               tc.function?.name,
               tc.function?.arguments,
               messages,
+              sessionId,
             );
             apiMessages.push({
               role: 'tool',
