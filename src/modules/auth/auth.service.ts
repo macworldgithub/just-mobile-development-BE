@@ -49,6 +49,7 @@ export interface UserDocument {
   twoFactorEnabled?: boolean;
   twoFactorSecret?: string;
   twoFactorPendingSecret?: string;
+  twoFactorSwitchAuthorizedUntil?: Date | null;
   twoFactorBackupCodeHashes?: string[];
   lastUsedTotpCode?: string;
   lastUsedTotpAt?: number;
@@ -1001,8 +1002,12 @@ export class AuthService implements OnModuleInit {
     };
   }
 
-  async setupTwoFactor(authHeader?: string) {
+  async setupTwoFactor(authHeader?: string, currentCodeRaw?: string) {
     const user = await this.getAuthenticatedUser(authHeader);
+    if (user.twoFactorEnabled && user.twoFactorSecret) {
+      await this.verifyActionTwoFactor(user, currentCodeRaw || '');
+    }
+
     const secret = authenticator.generateSecret(20);
     const label = user.custNo ? `${user.email || user.custNo} (${user.custNo})` : user.email;
     const otpauthUrl = authenticator.keyuri(label, 'JustMobile', secret);
@@ -1015,7 +1020,14 @@ export class AuthService implements OnModuleInit {
     const usersCol = this.db.getCollection<UserDocument>('users');
     await usersCol.updateOne(
       { _id: user._id },
-      { $set: { twoFactorPendingSecret: secret, updatedAt: new Date() } },
+      {
+        $set: {
+          twoFactorPendingSecret: secret,
+          twoFactorSwitchAuthorizedUntil:
+            user.twoFactorEnabled && user.twoFactorSecret ? new Date(Date.now() + 10 * 60 * 1000) : null,
+          updatedAt: new Date(),
+        },
+      },
     );
 
     return {
@@ -1028,9 +1040,19 @@ export class AuthService implements OnModuleInit {
     };
   }
 
-  async enableTwoFactor(authHeader: string | undefined, codeRaw: string) {
+  async enableTwoFactor(authHeader: string | undefined, codeRaw: string, currentCodeRaw?: string) {
     const user = await this.getAuthenticatedUser(authHeader);
     const code = (codeRaw || '').trim().replace(/\s+/g, '');
+
+    if (user.twoFactorEnabled && user.twoFactorSecret) {
+      const switchUntil = user.twoFactorSwitchAuthorizedUntil;
+      const switchValid = switchUntil instanceof Date
+        ? switchUntil.getTime() > Date.now()
+        : Boolean(switchUntil && new Date(switchUntil).getTime() > Date.now());
+      if (!switchValid) {
+        await this.verifyActionTwoFactor(user, currentCodeRaw || '');
+      }
+    }
 
     if (!user.twoFactorPendingSecret) {
       throw new BadRequestException('No 2FA setup is in progress. Please generate a QR code first.');
@@ -1059,6 +1081,7 @@ export class AuthService implements OnModuleInit {
           twoFactorEnabled: true,
           twoFactorSecret: user.twoFactorPendingSecret,
           twoFactorPendingSecret: '',
+          twoFactorSwitchAuthorizedUntil: null,
           twoFactorBackupCodeHashes: backupHashes,
           updatedAt: new Date(),
         },
@@ -1085,6 +1108,7 @@ export class AuthService implements OnModuleInit {
           twoFactorEnabled: false,
           twoFactorSecret: '',
           twoFactorPendingSecret: '',
+          twoFactorSwitchAuthorizedUntil: null,
           twoFactorBackupCodeHashes: [],
           updatedAt: new Date(),
         },
@@ -1223,8 +1247,9 @@ export class AuthService implements OnModuleInit {
       throw new UnauthorizedException('Admin access required.');
     }
 
-    if (this.cachedAdminStats && Date.now() < this.cachedAdminStats.expiresAt) {
-      return this.cachedAdminStats.payload;
+    const cached = this.cachedAdminStats;
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.payload;
     }
 
     const usersCol = this.db.getCollection<UserDocument>('users');
@@ -1309,9 +1334,10 @@ export class AuthService implements OnModuleInit {
         );
         for (const r of results) {
           if (r.status === 'fulfilled') {
-            liveServicesByCust.set(r.value.custNo, r.value.services);
-            if (r.value.singleEmail) {
-              liveCustFallbackEmail.set(r.value.custNo, r.value.singleEmail);
+            const val = (r as PromiseFulfilledResult<{ custNo: string; services: any[]; singleEmail: string }>).value;
+            liveServicesByCust.set(val.custNo, val.services);
+            if (val.singleEmail) {
+              liveCustFallbackEmail.set(val.custNo, val.singleEmail);
             }
           }
         }

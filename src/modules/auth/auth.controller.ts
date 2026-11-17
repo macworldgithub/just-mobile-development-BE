@@ -90,17 +90,20 @@ export class AuthController {
 
   @Post('2fa/setup')
   @HttpCode(HttpStatus.OK)
-  async setupTwoFactor(@Headers('authorization') authHeader?: string) {
-    return this.authService.setupTwoFactor(authHeader);
+  async setupTwoFactor(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body?: { currentTwoFactorCode?: string; code?: string },
+  ) {
+    return this.authService.setupTwoFactor(authHeader, body?.currentTwoFactorCode || body?.code);
   }
 
   @Post('2fa/enable')
   @HttpCode(HttpStatus.OK)
   async enableTwoFactor(
     @Headers('authorization') authHeader: string | undefined,
-    @Body() body: { code: string },
+    @Body() body: { code: string; currentTwoFactorCode?: string },
   ) {
-    return this.authService.enableTwoFactor(authHeader, body.code);
+    return this.authService.enableTwoFactor(authHeader, body.code, body.currentTwoFactorCode);
   }
 
   @Post('2fa/disable')
