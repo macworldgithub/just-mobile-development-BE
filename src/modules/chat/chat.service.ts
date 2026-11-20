@@ -531,7 +531,7 @@ export class ChatService {
               suburb: { type: 'string' },
               state: { type: 'string', description: 'Australian state code e.g. NSW, VIC, QLD, SA, WA, TAS, ACT, NT' },
               postcode: { type: 'string', description: '4-digit Australian postcode' },
-              password: { type: 'string', description: 'Account password (minimum 6 characters) for logging into /login and /account' },
+              password: { type: 'string', description: 'Account password (minimum 6 characters) for signing into My Account' },
               code: { type: 'string', description: '6-digit email verification code' },
             },
             required: ['firstName', 'surname', 'email', 'dob', 'address', 'suburb', 'state', 'postcode', 'password', 'code'],
@@ -1073,7 +1073,7 @@ export class ChatService {
           ? await this.mailService.sendCustomerNotificationEmail(
               user.email,
               `JustMobile Tax Invoice ${target.invoiceId}`,
-              `Here is a summary of your ATO Tax Invoice ${target.invoiceId} (${target.periodStart} to ${target.periodEnd}):\nPlan: ${target.planName}\nTotal (incl. GST): $${Number(target.amount).toFixed(2)}\nStatus: ${target.status}\n\nYou can download the full PDF anytime in /account -> Billing & Payment Method.`,
+              `Here is a summary of your ATO Tax Invoice ${target.invoiceId} (${target.periodStart} to ${target.periodEnd}):\nPlan: ${target.planName}\nTotal (incl. GST): $${Number(target.amount).toFixed(2)}\nStatus: ${target.status}\n\nYou can download the full PDF anytime in My Account -> Billing & Payment Method at justmobile.com.au.`,
             )
           : false;
 
@@ -1082,7 +1082,8 @@ export class ChatService {
           invoiceId: target.invoiceId,
           amount: target.amount,
           status: target.status,
-          pdfDownloadPath: `/api/carrier/customers/${custNo}/invoices/${target.invoiceId}/pdf`,
+          downloadInstructions:
+            'Sign into [My Account](/account) -> Billing & Payment Method to download the full ATO PDF tax invoice.',
           portalPath: '/account',
           emailed,
         });
@@ -1126,7 +1127,7 @@ export class ChatService {
         if (!order && custNo !== 'CUST990001') {
           return JSON.stringify({
             sent: false,
-            error: 'No existing eSIM order found on this account yet. Complete an order in /account first.',
+            error: 'No existing eSIM order found on this account yet. Complete an order in chat or [My Account](/account) first.',
           });
         }
         const targetId = order?.orderId || 'CUST990001';
@@ -1331,7 +1332,7 @@ export class ChatService {
           custNo: assignedCustNo,
           name: signupRes?.user?.name,
           email: signupRes?.user?.email,
-          portalHint: 'Customer can also log into /login and manage their service in /account anytime.',
+          portalHint: 'Customer can also sign in via [Sign In](/login) and manage their service in [My Account](/account) anytime.',
           message: signupRes?.message || `Customer account #${assignedCustNo} created and verified.`,
         });
       }
@@ -1429,7 +1430,7 @@ export class ChatService {
           return JSON.stringify({
             opened: true,
             purpose: 'update_card',
-            message: 'Secure Westpac QuickStream payment card form opened below in chat. Customer can also manage cards anytime in /account.',
+            message: 'Secure Westpac QuickStream payment card form opened below in chat. Customer can also manage cards anytime in [My Account](/account).',
           });
         }
 
@@ -1537,7 +1538,7 @@ export class ChatService {
           planPrice: plan.price,
           msn,
           message:
-            'The secure Westpac QuickStream payment card form is now open inline below inside this chat window. Ask the customer to complete card setup inside the secure frame to activate their eSIM (they can also log into /account anytime).',
+            'The secure Westpac QuickStream payment card form is now open inline below inside this chat window. Ask the customer to complete card setup inside the secure frame to activate their eSIM (they can also visit [My Account](/account) anytime).',
         });
       }
 
@@ -1574,7 +1575,7 @@ export class ChatService {
       .catch(() => null);
 
     let systemContent = containsSensitive
-      ? `${BELE_SYSTEM_PROMPT}\n\n[SECURITY ALERT: The user's last message appears to contain sensitive card/PIN/ID details. Immediately warn them NOT to share card numbers, CVVs, PINs, or identity numbers in chat, do NOT repeat those numbers back, and direct them to /account or 1300 492 002.]`
+      ? `${BELE_SYSTEM_PROMPT}\n\n[SECURITY ALERT: The user's last message appears to contain sensitive card/PIN/ID details. Immediately warn them NOT to share card numbers, CVVs, PINs, or identity numbers in chat, do NOT repeat those numbers back, and direct them to [My Account](/account) or 1300 492 002.]`
       : BELE_SYSTEM_PROMPT;
 
     if (activeSession?.custNo) {
@@ -1617,7 +1618,7 @@ export class ChatService {
           this.logger.error(`OpenAI error status ${res.status}:`, errBody);
           return {
             reply:
-              "I'm having a brief connection hiccup right now. You can view plans at justmobile.com.au, manage your service in /account, or reach our team on 1300 492 002 or info@justmobile.ai.",
+              "I'm having a brief connection hiccup right now. You can view plans at justmobile.com.au, manage your service in [My Account](/account), or reach our team on 1300 492 002 or info@justmobile.ai.",
           };
         }
 

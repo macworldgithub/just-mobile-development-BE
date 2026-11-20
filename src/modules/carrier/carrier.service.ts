@@ -1534,48 +1534,53 @@ export class CarrierService {
   }
 
   /**
-   * Simulate a donor network rejection for testing port-in edge case flows
+   * Look up the owning customer number for an orderId (used for JWT ownership checks)
    */
-  async simulatePortRejection(
-    orderId: string,
-    reason?: string,
-    donor?: string,
-  ): Promise<{ success: boolean; message: string; order: any }> {
+  async resolveOrderOwnerCustNo(orderId: string): Promise<string | null> {
+    const cleanOrderId = String(orderId || '').trim();
+    if (!cleanOrderId) return null;
     const ordersCol = this.db.getCollection<OrderRecord>('orders');
-    const order = await ordersCol.findOne({ orderId });
+    const order = await ordersCol.findOne({ orderId: cleanOrderId });
+    return order?.custNo ? String(order.custNo).trim() : null;
+  }
 
-    if (!order) {
-      throw new NotFoundException(`Order #${orderId} not found.`);
+  /**
+   * Look up the owning customer number for a QR identifier (orderId, custNo, or MSN)
+   */
+  async resolveQrOwnerCustNo(identifier: string): Promise<string | null> {
+    const cleanId = String(identifier || '').trim();
+    if (!cleanId) return null;
+
+    const normalizedPhone = cleanId.replace(/\s+/g, '');
+    const ordersCol = this.db.getCollection<OrderRecord>('orders');
+    const order = await ordersCol.findOne(
+      {
+        $or: [{ orderId: cleanId }, { custNo: cleanId }, { msn: normalizedPhone }],
+      },
+      { sort: { updatedAt: -1 } },
+    );
+    if (order?.custNo) {
+      return String(order.custNo).trim();
     }
 
-    const donorName = donor || order.donorCarrier || 'Optus';
-    const isPostpaid = order.numType === 'postpaid';
-    const defaultReason = isPostpaid
-      ? `Account Number does not match records at ${donorName}. Please verify the account number on your latest bill.`
-      : `Date of Birth does not match records at ${donorName}. Please verify the birthdate on your account.`;
+    const usersCol = this.db.getCollection('users');
+    const userOrClauses: any[] = [{ custNo: cleanId }];
+    if (/^\d+$/.test(cleanId) && !normalizedPhone.startsWith('04')) {
+      userOrClauses.push({ custNo: Number(cleanId) });
+    }
+    if (normalizedPhone.startsWith('04') || normalizedPhone.startsWith('+614')) {
+      userOrClauses.push({ phone: cleanId }, { phone: normalizedPhone });
+    }
+    const userDoc = await usersCol.findOne({ $or: userOrClauses });
+    if (userDoc?.custNo) {
+      return String(userDoc.custNo).trim();
+    }
 
-    const rejectionReason = reason || defaultReason;
-    const rejectionCode = isPostpaid ? 'REJECT_INVALID_ACCOUNT_NO' : 'REJECT_DOB_MISMATCH';
+    if (/^(CUST\d+|\d+)$/i.test(cleanId) && !normalizedPhone.startsWith('04')) {
+      return cleanId;
+    }
 
-    await ordersCol.updateOne(
-      { orderId },
-      {
-        $set: {
-          status: 'REJECTED',
-          rejectionReason,
-          rejectionCode,
-          donorCarrier: donorName,
-          updatedAt: new Date(),
-        },
-      },
-    );
-
-    const updated = await ordersCol.findOne({ orderId });
-    return {
-      success: true,
-      message: `Donor carrier rejection simulated for order #${orderId}`,
-      order: updated,
-    };
+    return null;
   }
 
   /**
@@ -1777,13 +1782,19 @@ export class CarrierService {
    * Resend / Send Order eSIM Welcome Email (INT-07)
    */
   async sendOrderEsimEmail(custNo: string, orderId: string, targetEmail?: string) {
+    const cleanCustNo = String(custNo || '').trim();
+    const cleanOrderId = String(orderId || '').trim();
     const ordersCol = this.db.getCollection<OrderRecord>('orders');
-    const order = await ordersCol.findOne(
+    let order = await ordersCol.findOne(
       {
-        $or: [{ orderId }, { custNo }, { msn: orderId.replace(/\s+/g, '') }],
+        custNo: cleanCustNo,
+        $or: [{ orderId: cleanOrderId }, { msn: cleanOrderId.replace(/\s+/g, '') }],
       },
       { sort: { updatedAt: -1 } },
     );
+    if (!order) {
+      order = await ordersCol.findOne({ custNo: cleanCustNo }, { sort: { updatedAt: -1 } });
+    }
 
     if (!order) {
       throw new NotFoundException(`Order with reference ${orderId} not found.`);

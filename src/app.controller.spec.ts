@@ -556,3 +556,137 @@ describe('ChatService Registration & Inline QuickStream Flow', () => {
     );
   });
 });
+
+describe('CarrierController Auth, Ownership & Simulate-Rejection Removal', () => {
+  it('enforces verifyCustomerAccess across all customer PII, billing, invoice PDF, and eSIM email endpoints', async () => {
+    const verifyCustomerAccess = jest.fn().mockRejectedValue(new ForbiddenException('Not authorised'));
+    const carrierService: any = {
+      getCustomer: jest.fn(),
+      getServices: jest.fn(),
+      getBalance: jest.fn(),
+      getUnbilledUsage: jest.fn(),
+      getCustomerOrders: jest.fn(),
+      sendOrderEsimEmail: jest.fn(),
+    };
+    const invoiceService: any = {
+      getCustomerInvoices: jest.fn(),
+      generateTaxInvoicePdf: jest.fn(),
+      submitBillQuery: jest.fn(),
+      getBillQueries: jest.fn(),
+    };
+    const controller = new CarrierController(
+      carrierService,
+      invoiceService,
+      {} as any,
+      { verifyCustomerAccess } as any,
+    );
+    const mockRes: any = { setHeader: jest.fn(), end: jest.fn() };
+
+    await expect(controller.getCustomer('551059', 'Bearer bad')).rejects.toThrow(ForbiddenException);
+    await expect(controller.getServices('551059', 'Bearer bad')).rejects.toThrow(ForbiddenException);
+    await expect(controller.getBalance('551059', 'Bearer bad')).rejects.toThrow(ForbiddenException);
+    await expect(controller.getUsage('551059', 'Bearer bad')).rejects.toThrow(ForbiddenException);
+    await expect(controller.getCustomerOrders('551059', 'Bearer bad')).rejects.toThrow(ForbiddenException);
+    await expect(controller.getCustomerInvoices('551059', 'Bearer bad')).rejects.toThrow(ForbiddenException);
+    await expect(
+      controller.downloadInvoicePdf('551059', 'INV-1', mockRes, 'Bearer bad'),
+    ).rejects.toThrow(ForbiddenException);
+    await expect(
+      controller.submitBillQuery('551059', 'Bearer bad', { invoiceId: 'INV-1', message: 'Check charge' }),
+    ).rejects.toThrow(ForbiddenException);
+    await expect(controller.getBillQueries('551059', 'Bearer bad')).rejects.toThrow(ForbiddenException);
+    await expect(
+      controller.sendOrderEsimEmail('551059', 'ORD-1', 'Bearer bad', { email: 'a@b.com' }),
+    ).rejects.toThrow(ForbiddenException);
+
+    expect(carrierService.getCustomer).not.toHaveBeenCalled();
+    expect(carrierService.getServices).not.toHaveBeenCalled();
+    expect(carrierService.getBalance).not.toHaveBeenCalled();
+    expect(carrierService.getUnbilledUsage).not.toHaveBeenCalled();
+    expect(carrierService.getCustomerOrders).not.toHaveBeenCalled();
+    expect(carrierService.sendOrderEsimEmail).not.toHaveBeenCalled();
+    expect(invoiceService.getCustomerInvoices).not.toHaveBeenCalled();
+    expect(invoiceService.generateTaxInvoicePdf).not.toHaveBeenCalled();
+    expect(mockRes.end).not.toHaveBeenCalled();
+    expect(invoiceService.submitBillQuery).not.toHaveBeenCalled();
+    expect(invoiceService.getBillQueries).not.toHaveBeenCalled();
+  });
+
+  it('enforces verifyAdminAccess on POST /api/carrier/customers', async () => {
+    const verifyAdminAccess = jest.fn().mockRejectedValue(new ForbiddenException('Admin access required.'));
+    const addCustomer = jest.fn();
+    const controller = new CarrierController(
+      { addCustomer } as any,
+      {} as any,
+      {} as any,
+      { verifyAdminAccess } as any,
+    );
+
+    await expect(
+      controller.addCustomer('Bearer customer-tok', { firstName: 'Sam', email: 'sam@example.com' }),
+    ).rejects.toThrow(ForbiddenException);
+    expect(verifyAdminAccess).toHaveBeenCalledWith('Bearer customer-tok');
+    expect(addCustomer).not.toHaveBeenCalled();
+
+    verifyAdminAccess.mockResolvedValueOnce({ role: 'admin' });
+    addCustomer.mockResolvedValueOnce({ custNo: '551999', isMock: true });
+    const created = await controller.addCustomer('Bearer admin-tok', { firstName: 'Sam' });
+    expect(created).toEqual({ custNo: '551999', isMock: true });
+  });
+
+  it('enforces order and QR ownership across queryOrder, syncPortOrder, resubmitPortOrder, and getEsimQRCode', async () => {
+    const verifyCustomerAccess = jest.fn().mockResolvedValue({ custNo: '551059', role: 'customer' });
+    const carrierService: any = {
+      resolveOrderOwnerCustNo: jest.fn().mockResolvedValue('999888'),
+      resolveQrOwnerCustNo: jest.fn().mockResolvedValue('999888'),
+      queryOrder: jest.fn().mockResolvedValue({ orderId: 'ORD-OTHER', status: 'ACTIVE' }),
+      resubmitPortOrder: jest.fn().mockResolvedValue({ success: true }),
+      getEsimQRCode: jest.fn().mockResolvedValue({ orderId: 'ORD-OTHER', lpa: 'LPA:1$smdp$code' }),
+    };
+    const portingWorker: any = {
+      forceSyncOrder: jest.fn().mockResolvedValue({ orderId: 'ORD-OTHER', status: 'ACTIVE', message: 'ok' }),
+    };
+    const controller = new CarrierController(
+      carrierService,
+      {} as any,
+      portingWorker,
+      { verifyCustomerAccess } as any,
+    );
+
+    // Other customer's order & QR -> Forbidden
+    await expect(controller.queryOrder('ORD-OTHER', 'Bearer cust-551059')).rejects.toThrow(ForbiddenException);
+    await expect(controller.syncPortOrder('ORD-OTHER', 'Bearer cust-551059')).rejects.toThrow(ForbiddenException);
+    await expect(
+      controller.resubmitPortOrder('ORD-OTHER', 'Bearer cust-551059', { numType: 'prepaid', dob: '1990-01-01' }),
+    ).rejects.toThrow(ForbiddenException);
+    await expect(controller.getEsimQRCode('ORD-OTHER', 'Bearer cust-551059')).rejects.toThrow(ForbiddenException);
+    expect(carrierService.queryOrder).not.toHaveBeenCalled();
+    expect(portingWorker.forceSyncOrder).not.toHaveBeenCalled();
+    expect(carrierService.resubmitPortOrder).not.toHaveBeenCalled();
+    expect(carrierService.getEsimQRCode).not.toHaveBeenCalled();
+
+    // Owner -> Allowed
+    carrierService.resolveOrderOwnerCustNo.mockResolvedValue('551059');
+    carrierService.resolveQrOwnerCustNo.mockResolvedValue('551059');
+    await expect(controller.queryOrder('ORD-OWN', 'Bearer cust-551059')).resolves.toEqual({
+      orderId: 'ORD-OTHER',
+      status: 'ACTIVE',
+    });
+    await expect(controller.getEsimQRCode('551059', 'Bearer cust-551059')).resolves.toEqual({
+      orderId: 'ORD-OTHER',
+      lpa: 'LPA:1$smdp$code',
+    });
+
+    // Admin -> Allowed even when custNo differs
+    verifyCustomerAccess.mockResolvedValue({ custNo: 'ADMIN', role: 'admin' });
+    carrierService.resolveOrderOwnerCustNo.mockResolvedValue('999888');
+    await expect(controller.syncPortOrder('ORD-OTHER', 'Bearer admin')).resolves.toEqual(
+      expect.objectContaining({ status: 'ACTIVE' }),
+    );
+  });
+
+  it('does not expose simulateRejection test helper on CarrierController or simulatePortRejection on CarrierService', () => {
+    expect((CarrierController.prototype as any).simulateRejection).toBeUndefined();
+    expect((CarrierService.prototype as any).simulatePortRejection).toBeUndefined();
+  });
+});

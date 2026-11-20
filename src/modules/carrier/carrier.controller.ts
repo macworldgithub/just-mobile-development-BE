@@ -12,6 +12,8 @@ import {
   HttpCode,
   HttpStatus,
   BadRequestException,
+  ForbiddenException,
+  NotFoundException,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { CarrierService } from './carrier.service';
@@ -30,38 +32,77 @@ export class CarrierController {
     private readonly authService: AuthService,
   ) {}
 
+  private async assertOrderAccess(authHeader: string | undefined, orderId: string) {
+    const caller = await this.authService.verifyCustomerAccess(authHeader);
+    const ownerCustNo = await this.carrierService.resolveOrderOwnerCustNo(orderId);
+    if (!ownerCustNo) {
+      if (caller.role !== 'admin') {
+        throw new NotFoundException(`Order #${orderId} not found.`);
+      }
+      return caller;
+    }
+    if (caller.role !== 'admin' && String(caller.custNo || '').trim() !== ownerCustNo) {
+      throw new ForbiddenException('You are not authorised to access another customer order.');
+    }
+    return caller;
+  }
+
   // ==========================================================================
   // CUSTOMER ENDPOINTS
   // ==========================================================================
 
   @Post('customers')
   @HttpCode(HttpStatus.CREATED)
-  async addCustomer(@Body() body: Record<string, any>) {
+  async addCustomer(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body: Record<string, any>,
+  ) {
+    await this.authService.verifyAdminAccess(authHeader);
     return this.carrierService.addCustomer(body as CarrierCustomerInput);
   }
 
   @Get('customers/:custNo')
-  async getCustomer(@Param('custNo') custNo: string) {
+  async getCustomer(
+    @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
     return this.carrierService.getCustomer(custNo);
   }
 
   @Get('customers/:custNo/services')
-  async getServices(@Param('custNo') custNo: string) {
+  async getServices(
+    @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
     return this.carrierService.getServices(custNo);
   }
 
   @Get('customers/:custNo/balance')
-  async getBalance(@Param('custNo') custNo: string) {
+  async getBalance(
+    @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
     return this.carrierService.getBalance(custNo);
   }
 
   @Get('customers/:custNo/usage')
-  async getUsage(@Param('custNo') custNo: string) {
+  async getUsage(
+    @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
     return this.carrierService.getUnbilledUsage(custNo);
   }
 
   @Get('customers/:custNo/orders')
-  async getCustomerOrders(@Param('custNo') custNo: string) {
+  async getCustomerOrders(
+    @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
     return this.carrierService.getCustomerOrders(custNo);
   }
 
@@ -90,7 +131,11 @@ export class CarrierController {
   // ==========================================================================
 
   @Get('customers/:custNo/invoices')
-  async getCustomerInvoices(@Param('custNo') custNo: string) {
+  async getCustomerInvoices(
+    @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
     return this.invoiceService.getCustomerInvoices(custNo);
   }
 
@@ -99,7 +144,9 @@ export class CarrierController {
     @Param('custNo') custNo: string,
     @Param('invoiceId') invoiceId: string,
     @Res() res: Response,
+    @Headers('authorization') authHeader?: string,
   ) {
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
     const pdfBuffer = await this.invoiceService.generateTaxInvoicePdf(custNo, invoiceId);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="JustMobile-Tax-Invoice-${invoiceId}.pdf"`);
@@ -160,6 +207,7 @@ export class CarrierController {
   @HttpCode(HttpStatus.CREATED)
   async submitBillQuery(
     @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader: string | undefined,
     @Body()
     body: {
       invoiceId: string;
@@ -169,11 +217,16 @@ export class CarrierController {
       name?: string;
     },
   ) {
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
     return this.invoiceService.submitBillQuery(custNo, body);
   }
 
   @Get('customers/:custNo/bill-queries')
-  async getBillQueries(@Param('custNo') custNo: string) {
+  async getBillQueries(
+    @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
     return this.invoiceService.getBillQueries(custNo);
   }
 
@@ -217,13 +270,21 @@ export class CarrierController {
   }
 
   @Get('orders/:orderId')
-  async queryOrder(@Param('orderId') orderId: string) {
+  async queryOrder(
+    @Param('orderId') orderId: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    await this.assertOrderAccess(authHeader, orderId);
     return this.carrierService.queryOrder(orderId);
   }
 
   @Post('orders/:orderId/sync-port')
   @HttpCode(HttpStatus.OK)
-  async syncPortOrder(@Param('orderId') orderId: string) {
+  async syncPortOrder(
+    @Param('orderId') orderId: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    await this.assertOrderAccess(authHeader, orderId);
     return this.portingWorker.forceSyncOrder(orderId);
   }
 
@@ -231,8 +292,10 @@ export class CarrierController {
   @HttpCode(HttpStatus.OK)
   async resubmitPortOrder(
     @Param('orderId') orderId: string,
+    @Headers('authorization') authHeader: string | undefined,
     @Body() body: { numType?: 'prepaid' | 'postpaid'; dob?: string; arn?: string; donorCarrier?: string },
   ) {
+    await this.assertOrderAccess(authHeader, orderId);
     return this.carrierService.resubmitPortOrder(orderId, body);
   }
 
@@ -248,21 +311,20 @@ export class CarrierController {
     return this.carrierService.cancelPortOrder(custNo, orderId, body?.reason);
   }
 
-  @Post('orders/:orderId/simulate-rejection')
-  @HttpCode(HttpStatus.OK)
-  async simulateRejection(
-    @Param('orderId') orderId: string,
-    @Body() body?: { reason?: string; donor?: string },
-  ) {
-    return this.carrierService.simulatePortRejection(orderId, body?.reason, body?.donor);
-  }
-
   // ==========================================================================
   // ESIM DIGITAL QR CODE ENDPOINTS
   // ==========================================================================
 
   @Get('qrcodes/:identifier')
-  async getEsimQRCode(@Param('identifier') identifier: string) {
+  async getEsimQRCode(
+    @Param('identifier') identifier: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    const caller = await this.authService.verifyCustomerAccess(authHeader);
+    const ownerCustNo = await this.carrierService.resolveQrOwnerCustNo(identifier);
+    if (caller.role !== 'admin' && (!ownerCustNo || String(caller.custNo || '').trim() !== ownerCustNo)) {
+      throw new ForbiddenException('You are not authorised to access this eSIM QR code.');
+    }
     return this.carrierService.getEsimQRCode(identifier);
   }
 
@@ -271,8 +333,10 @@ export class CarrierController {
   async sendOrderEsimEmail(
     @Param('custNo') custNo: string,
     @Param('orderId') orderId: string,
+    @Headers('authorization') authHeader: string | undefined,
     @Body() body?: { email?: string },
   ) {
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
     return this.carrierService.sendOrderEsimEmail(custNo, orderId, body?.email);
   }
 

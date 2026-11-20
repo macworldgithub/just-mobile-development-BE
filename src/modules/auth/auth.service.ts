@@ -1203,6 +1203,14 @@ export class AuthService implements OnModuleInit {
     return user;
   }
 
+  async verifyAdminAccess(authHeader: string | undefined) {
+    const user = await this.getAuthenticatedUser(authHeader);
+    if (user.role !== 'admin') {
+      throw new ForbiddenException('Admin access required.');
+    }
+    return user;
+  }
+
   async verifyActionTwoFactorForHeader(
     authHeader: string | undefined,
     codeRaw: string,
