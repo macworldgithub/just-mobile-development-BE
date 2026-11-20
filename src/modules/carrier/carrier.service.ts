@@ -2101,7 +2101,13 @@ export class CarrierService {
     destination: string;
     message: string;
   }> {
-    const cleanDestination = destination.replace(/\s+/g, '');
+    const cleanDestination = this.normalizeMsn(destination);
+    if (!/^04\d{8}$/.test(cleanDestination)) {
+      throw new BadRequestException(
+        'Please provide a valid 10-digit Australian mobile number (e.g. 0412 345 678).',
+      );
+    }
+
     const transactionId = `TX-PORT-${Date.now()}`;
     const mockCode = '829104';
 
@@ -2114,7 +2120,7 @@ export class CarrierService {
           manageOtpRequest: {
             requestType: 'getOtp',
             getOtp: {
-              custNo: cleanCustNo,
+              ...(cleanCustNo ? { custNo: Number(cleanCustNo) } : {}),
               destination: cleanDestination,
               destinationCategory: 'Phone (Bh)',
               destinationType: 'Primary Account Holder',
@@ -2126,14 +2132,23 @@ export class CarrierService {
         });
 
         const ret = this.assertOctaneSoapSuccess('UtbOTP getOtp', result);
-        if (!ret?.transactionId) {
+        const getOtpNode = ret?.getOtp || ret;
+        const nodeCheck = this.hasOctaneFailure(getOtpNode);
+        if (nodeCheck.failed) {
+          this.logger.error(`Octane rejected UtbOTP getOtp: ${nodeCheck.detail}`);
+          throw new BadRequestException(this.formatFriendlyCarrierError('UtbOTP getOtp', nodeCheck.detail));
+        }
+
+        const txId = getOtpNode?.transactionId || ret?.transactionId;
+        if (!txId) {
+          this.logger.error(`UtbOTP getOtp missing transactionId: ${JSON.stringify(ret)}`);
           throw new BadRequestException(this.formatFriendlyCarrierError('UtbOTP getOtp', 'Missing transactionId'));
         }
         return {
           success: true,
-          transactionId: String(ret.transactionId),
+          transactionId: String(txId),
           destination: cleanDestination,
-          message: `ACMA security code dispatched to ${cleanDestination}.`,
+          message: `ACMA security code dispatched via SMS to ${cleanDestination}.`,
         };
       } catch (err: any) {
         this.logger.error(`Live OTP dispatch failed: ${err.message}`);
@@ -2193,9 +2208,19 @@ export class CarrierService {
         });
 
         const ret = this.assertOctaneSoapSuccess('UtbOTP verifyOtp', result);
-        const verified = Boolean(ret?.success);
+        const verifyNode = ret?.verifyOtp || ret;
+        const nodeCheck = this.hasOctaneFailure(verifyNode);
+        if (nodeCheck.failed) {
+          this.logger.error(`Octane rejected UtbOTP verifyOtp: ${nodeCheck.detail}`);
+          throw new BadRequestException(this.formatFriendlyCarrierError('UtbOTP verifyOtp', nodeCheck.detail));
+        }
+
+        const rawValid = verifyNode?.valid ?? ret?.valid ?? ret?.success;
+        const verified = rawValid === true || String(rawValid || '').trim().toLowerCase() === 'true';
         if (!verified) {
-          throw new BadRequestException('The verification code was incorrect or expired. Please check your SMS and try again.');
+          throw new BadRequestException(
+            verifyNode?.message || 'The verification code was incorrect or expired. Please check your SMS and try again.',
+          );
         }
         return {
           success: true,

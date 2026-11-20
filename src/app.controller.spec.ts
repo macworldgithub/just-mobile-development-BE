@@ -690,3 +690,196 @@ describe('CarrierController Auth, Ownership & Simulate-Rejection Removal', () =>
     expect((CarrierService.prototype as any).simulatePortRejection).toBeUndefined();
   });
 });
+
+describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () => {
+  const originalTelcoLive = process.env.TELCO_LIVE_CREATE;
+
+  afterEach(() => {
+    process.env.TELCO_LIVE_CREATE = originalTelcoLive;
+    jest.restoreAllMocks();
+  });
+
+  function makeOtpCarrierService() {
+    const mockDb: any = {
+      getCollection: jest.fn(() => ({
+        insertOne: jest.fn(),
+        findOne: jest.fn(),
+        updateOne: jest.fn(),
+      })),
+    };
+    const mockMail: any = { sendMail: jest.fn() };
+    return new CarrierService(mockDb, mockMail);
+  }
+
+  it('sendPrePortOtp sends numeric custNo, normalizes destination, reads nested getOtp.transactionId, and rejects non-04XX/masked input', async () => {
+    process.env.TELCO_LIVE_CREATE = 'true';
+    const service = makeOtpCarrierService();
+    const soapSpy = jest.spyOn(service, 'soapCall').mockResolvedValue({
+      return: {
+        message: 'Success',
+        getOtp: {
+          errorCode: '0',
+          transactionId: 'OCTANE-TX-9988',
+          destination: '0412345678',
+        },
+      },
+    });
+
+    await expect(service.sendPrePortOtp('551059', '0412 *** 678')).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(soapSpy).not.toHaveBeenCalled();
+
+    const res = await service.sendPrePortOtp('551059', '+61 412 345 678');
+    expect(soapSpy).toHaveBeenCalledWith(
+      '/UtbOTP',
+      'manageOtp',
+      expect.objectContaining({
+        manageOtpRequest: {
+          requestType: 'getOtp',
+          getOtp: expect.objectContaining({
+            custNo: 551059,
+            destination: '0412345678',
+            method: 'SMS',
+            operationType: 'Port',
+            reason: 'R8',
+          }),
+        },
+      }),
+    );
+    expect(res).toEqual(
+      expect.objectContaining({
+        success: true,
+        transactionId: 'OCTANE-TX-9988',
+        destination: '0412345678',
+      }),
+    );
+  });
+
+  it('verifyPrePortOtp reads nested verifyOtp.valid === true and throws BadRequestException when valid === false', async () => {
+    process.env.TELCO_LIVE_CREATE = 'true';
+    const service = makeOtpCarrierService();
+    const soapSpy = jest.spyOn(service, 'soapCall').mockResolvedValueOnce({
+      return: {
+        verifyOtp: {
+          errorCode: '0',
+          valid: true,
+          transactionId: 'OCTANE-TX-9988',
+        },
+      },
+    });
+
+    const ok = await service.verifyPrePortOtp('OCTANE-TX-9988', '123456');
+    expect(ok).toEqual(
+      expect.objectContaining({
+        success: true,
+        verified: true,
+        transactionId: 'OCTANE-TX-9988',
+      }),
+    );
+
+    soapSpy.mockResolvedValueOnce({
+      return: {
+        verifyOtp: {
+          errorCode: '0',
+          valid: false,
+          message: 'Code mismatch',
+        },
+      },
+    });
+    await expect(service.verifyPrePortOtp('OCTANE-TX-9988', '000000')).rejects.toThrow(
+      BadRequestException,
+    );
+  });
+
+  it('ChatService send_port_sms_otp resolves saved registered phone when destination is masked/omitted, and open_quickstream_card_form auto-hydrates dob & msn', async () => {
+    const updateOneMock = jest.fn().mockResolvedValue({ modifiedCount: 1 });
+    const findOneMock = jest.fn().mockImplementation((query: any) => {
+      if (query?.orderType === 'PORT_IN') return Promise.resolve(null);
+      if (query?.sessionId) {
+        return Promise.resolve({
+          sessionId: 'sess-existing-1',
+          custNo: '551059',
+          active: true,
+          expiresAt: new Date(Date.now() + 600000),
+          portOtpVerified: true,
+          portOtpVerifiedNumber: '0412345678',
+        });
+      }
+      return Promise.resolve({
+        custNo: '551059',
+        email: 'yaseen@neximet.com',
+        firstName: 'Yaseen',
+        surname: 'Jamal',
+        phone: '0412 345 678',
+        dob: '23/11/2002',
+        address: '100 George St',
+        suburb: 'Sydney',
+        state: 'NSW',
+        postcode: '2000',
+      });
+    });
+    const mockDb: any = {
+      getCollection: jest.fn(() => ({ findOne: findOneMock, updateOne: updateOneMock })),
+    };
+    const sendPrePortOtpMock = jest.fn().mockResolvedValue({
+      success: true,
+      transactionId: 'OCTANE-TX-123',
+      destination: '0412345678',
+      message: 'ACMA security code dispatched via SMS to 0412345678.',
+    });
+    const issueTokenMock = jest.fn().mockResolvedValue('jwt-551059');
+    const chatService = new ChatService(
+      mockDb,
+      {} as any,
+      { sendPrePortOtp: sendPrePortOtpMock } as any,
+      {} as any,
+      { issueTokenForCustomer: issueTokenMock } as any,
+    );
+
+    const otpRes = JSON.parse(
+      await chatService.executeToolCall(
+        'send_port_sms_otp',
+        JSON.stringify({ custNo: '551059', destination: '0412 *** 678' }),
+        [],
+        'sess-existing-1',
+      ),
+    );
+    expect(sendPrePortOtpMock).toHaveBeenCalledWith('551059', '0412345678');
+    expect(otpRes).toEqual(
+      expect.objectContaining({
+        sent: true,
+        transactionId: 'OCTANE-TX-123',
+        destination: '0412345678',
+      }),
+    );
+
+    const emitted: any[] = [];
+    const qsRes = JSON.parse(
+      await chatService.executeToolCall(
+        'open_quickstream_card_form',
+        JSON.stringify({
+          custNo: '551059',
+          purpose: 'port_order',
+          planName: 'JM 10GB Auto',
+          numType: 'prepaid',
+          donorCarrier: 'Vodafone',
+        }),
+        [],
+        'sess-existing-1',
+        (act) => emitted.push(act),
+      ),
+    );
+    expect(qsRes.opened).toBe(true);
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0].orderDraft).toEqual(
+      expect.objectContaining({
+        custNo: '551059',
+        msn: '0412345678',
+        dob: '2002-11-23',
+        donorCarrier: 'Vodafone',
+        numType: 'prepaid',
+      }),
+    );
+  });
+});

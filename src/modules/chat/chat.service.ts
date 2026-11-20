@@ -180,22 +180,38 @@ export class ChatService {
   /** Fetch verified customer snapshot shared between verified lookup and OTP verification. */
   private async buildVerifiedAccountPayload(user: any) {
     const custNo = String(user.custNo || '');
-    const [services, balance, usage, orders, invoices] = await Promise.all([
+    const [services, balance, usage, orders, invoices, liveCustomer] = await Promise.all([
       custNo ? this.carrierService.getServices(custNo).catch(() => ({ services: [] })) : { services: [] },
       custNo ? this.carrierService.getBalance(custNo).catch(() => null) : null,
       custNo ? this.carrierService.getUnbilledUsage(custNo).catch(() => null) : null,
       custNo ? this.carrierService.getCustomerOrders(custNo).catch(() => []) : [],
       custNo ? this.invoiceService.getCustomerInvoices(custNo).catch(() => []) : [],
+      custNo && typeof this.carrierService?.getCustomer === 'function'
+        ? this.carrierService.getCustomer(custNo).catch(() => null)
+        : null,
     ]);
+
+    const rawPhone = user.phone || liveCustomer?.phone || '';
+    const registeredPhone = this.normalizeChatMsn(rawPhone);
+    const dobOnFile = this.normalizeChatDob(user.dob || liveCustomer?.dob || '');
+    const streetAddress = user.address || liveCustomer?.address || '';
+    const suburb = user.suburb || liveCustomer?.suburb || '';
+    const state = user.state || liveCustomer?.state || '';
+    const postcode = user.postcode || liveCustomer?.postcode || '';
+    const fullAddress = streetAddress
+      ? `${streetAddress}${suburb ? `, ${suburb}` : ''}${state ? ` ${state}` : ''}${postcode ? ` ${postcode}` : ''}`.trim()
+      : 'Not set';
 
     return {
       verified: true,
       custNo,
-      name: user.name,
-      preferredName: user.preferredName || user.firstName || user.name,
-      maskedEmail: this.maskEmail(user.email),
-      maskedPhone: this.maskPhone(user.phone || ''),
-      address: user.address ? `${user.address}, ${user.suburb || ''} ${user.state || ''} ${user.postcode || ''}`.trim() : 'Not set',
+      name: user.name || liveCustomer?.name,
+      preferredName: user.preferredName || user.firstName || user.name || liveCustomer?.firstName,
+      maskedEmail: this.maskEmail(user.email || liveCustomer?.email || ''),
+      maskedPhone: this.maskPhone(rawPhone),
+      registeredPhone: /^04\d{8}$/.test(registeredPhone) ? registeredPhone : null,
+      dobOnFile: dobOnFile || null,
+      address: fullAddress,
       services: services.services || [],
       balance: balance
         ? {
@@ -571,14 +587,18 @@ export class ChatService {
         function: {
           name: 'send_port_sms_otp',
           description:
-            'Send ACMA mandatory pre-port SMS 2FA OTP to the customer existing mobile number before transferring it (requires verified chat session).',
+            'Send ACMA mandatory pre-port SMS 2FA OTP to the customer existing 04XX mobile number before transferring it (requires verified chat session). Omit destination only if using the unmasked registeredPhone already saved on the verified customer profile.',
           parameters: {
             type: 'object',
             properties: {
               custNo: { type: 'string' },
-              destination: { type: 'string', description: 'Existing 04XX mobile number being transferred' },
+              destination: {
+                type: 'string',
+                description:
+                  'Unmasked 10-digit Australian 04XX mobile number being transferred (optional if using saved registeredPhone on file)',
+              },
             },
-            required: ['custNo', 'destination'],
+            required: ['custNo'],
           },
         },
       },
@@ -1355,7 +1375,29 @@ export class ChatService {
         if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
           return JSON.stringify({ sent: false, error: 'Identity verification required first.' });
         }
-        const destination = this.normalizeChatMsn(args.destination);
+
+        let rawDest = String(args.destination || '').trim();
+        let destination =
+          rawDest && !rawDest.includes('*') ? this.normalizeChatMsn(rawDest) : '';
+
+        if (!/^04\d{8}$/.test(destination)) {
+          const customer = await this.findCustomerByIdentifier(custNo);
+          destination = this.normalizeChatMsn(customer?.phone || '');
+          if (!/^04\d{8}$/.test(destination) && typeof this.carrierService?.getCustomer === 'function') {
+            const liveCust = await this.carrierService.getCustomer(custNo).catch(() => null);
+            destination = this.normalizeChatMsn(liveCust?.phone || '');
+          }
+        }
+
+        if (!/^04\d{8}$/.test(destination)) {
+          return JSON.stringify({
+            sent: false,
+            missingNumber: true,
+            error:
+              'No valid 10-digit 04XX Australian mobile number was provided or stored on the account. Ask the customer for the exact 04XX mobile number they want to transfer.',
+          });
+        }
+
         const res = await this.carrierService.sendPrePortOtp(custNo, destination);
         await this.db.getCollection('chat_sessions').updateOne(
           { sessionId: cleanSessionId, active: true },
@@ -1445,8 +1487,27 @@ export class ChatService {
           });
         }
 
-        const msn = this.normalizeChatMsn(args.msn);
-        if (!msn || msn.length < 10) {
+        const customer = await this.findCustomerByIdentifier(custNo);
+        const liveCustomer =
+          (!customer?.dob || !customer?.phone || !customer?.address) &&
+          typeof this.carrierService?.getCustomer === 'function'
+            ? await this.carrierService.getCustomer(custNo).catch(() => null)
+            : null;
+        const sessionDoc: any = await this.db
+          .getCollection('chat_sessions')
+          .findOne({ sessionId: cleanSessionId, active: true, expiresAt: { $gt: new Date() } });
+
+        const rawMsn = String(args.msn || '').trim();
+        let msn =
+          rawMsn && !rawMsn.includes('*') ? this.normalizeChatMsn(rawMsn) : '';
+        if (!/^04\d{8}$/.test(msn)) {
+          if (purpose === 'port_order' && sessionDoc?.portOtpVerifiedNumber) {
+            msn = this.normalizeChatMsn(sessionDoc.portOtpVerifiedNumber);
+          } else {
+            msn = this.normalizeChatMsn(customer?.phone || liveCustomer?.phone || '');
+          }
+        }
+        if (!msn || !/^04\d{8}$/.test(msn)) {
           return JSON.stringify({
             opened: false,
             error: 'Please select an available 04XX mobile number or provide your 10-digit Australian mobile number first.',
@@ -1462,7 +1523,7 @@ export class ChatService {
           if (!numType) {
             return JSON.stringify({ opened: false, error: 'Please specify whether your existing number is prepaid or postpaid.' });
           }
-          cleanDob = this.normalizeChatDob(args.dob);
+          cleanDob = this.normalizeChatDob(args.dob || customer?.dob || liveCustomer?.dob || '');
           cleanArn = String(args.arn || '').trim();
           if (numType === 'prepaid' && !cleanDob) {
             return JSON.stringify({ opened: false, error: 'Date of Birth is required for prepaid number transfers.' });
@@ -1471,9 +1532,6 @@ export class ChatService {
             return JSON.stringify({ opened: false, error: 'Current provider Account Number is required for postpaid number transfers.' });
           }
 
-          const sessionDoc: any = await this.db
-            .getCollection('chat_sessions')
-            .findOne({ sessionId: cleanSessionId, active: true, expiresAt: { $gt: new Date() } });
           if (!sessionDoc?.portOtpVerified || (sessionDoc?.portOtpVerifiedNumber && sessionDoc.portOtpVerifiedNumber !== msn)) {
             return JSON.stringify({
               opened: false,
@@ -1496,7 +1554,6 @@ export class ChatService {
           }
         }
 
-        const customer = await this.findCustomerByIdentifier(custNo);
         const authToken = await this.authService.issueTokenForCustomer(custNo);
         const orderDraft = {
           custNo,
@@ -1504,13 +1561,24 @@ export class ChatService {
           planNo: plan.planNo,
           planName: plan.name,
           pricePerMonth: plan.price,
-          email: customer?.email || '',
-          firstName: customer?.firstName || String(customer?.name || '').split(' ')[0] || '',
-          lastName: customer?.surname || String(customer?.name || '').split(' ').slice(1).join(' ') || '',
-          address: customer?.address || '',
-          suburb: customer?.suburb || '',
-          state: customer?.state || 'NSW',
-          postcode: customer?.postcode || '',
+          email: customer?.email || liveCustomer?.email || '',
+          firstName:
+            customer?.firstName ||
+            liveCustomer?.firstName ||
+            String(customer?.name || liveCustomer?.name || '').split(' ')[0] ||
+            '',
+          lastName:
+            customer?.surname ||
+            liveCustomer?.surname ||
+            String(customer?.name || liveCustomer?.name || '')
+              .split(' ')
+              .slice(1)
+              .join(' ') ||
+            '',
+          address: customer?.address || liveCustomer?.address || '',
+          suburb: customer?.suburb || liveCustomer?.suburb || '',
+          state: customer?.state || liveCustomer?.state || 'NSW',
+          postcode: customer?.postcode || liveCustomer?.postcode || '',
           ...(purpose === 'port_order'
             ? {
                 numType,
