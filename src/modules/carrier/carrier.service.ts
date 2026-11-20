@@ -562,16 +562,18 @@ export class CarrierService {
       return this.OCTANE_RETAIL_PLANS.find((p) => p.id === 'plan-180gb')!;
     }
     if (noStr) {
-      const byNo = this.OCTANE_RETAIL_PLANS.find((p) => p.planNo === noStr);
+      const byNo = this.OCTANE_RETAIL_PLANS.find(
+        (p) => p.planNo === noStr || p.id.toLowerCase() === noStr.toLowerCase(),
+      );
       if (byNo) return byNo;
     }
     if (nameStr) {
-      const byName = this.OCTANE_RETAIL_PLANS.find(
-        (p) =>
-          p.name.toLowerCase() === nameStr ||
-          nameStr.includes(`${p.dataGb}gb`),
+      const byExactName = this.OCTANE_RETAIL_PLANS.find((p) => p.name.toLowerCase() === nameStr);
+      if (byExactName) return byExactName;
+      const byGbMatch = this.OCTANE_RETAIL_PLANS.find((p) =>
+        new RegExp(`\\b${p.dataGb}\\s*gb\\b`, 'i').test(nameStr),
       );
-      if (byName) return byName;
+      if (byGbMatch) return byGbMatch;
     }
     return null;
   }

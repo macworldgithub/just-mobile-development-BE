@@ -76,6 +76,21 @@ export class ChatService {
     return `${digits.slice(0, 4)} *** ${digits.slice(-3)}`;
   }
 
+  private matchPlanFromCatalogue(raw?: string) {
+    const input = String(raw || '').trim().toLowerCase();
+    if (!input) return undefined;
+    return (
+      PLAN_CATALOGUE.find(
+        (p) =>
+          p.name.toLowerCase() === input ||
+          p.id.toLowerCase() === input ||
+          p.planNo === input,
+      ) ||
+      PLAN_CATALOGUE.find((p) => new RegExp(`\\b${p.dataGb}\\s*gb\\b`, 'i').test(input)) ||
+      PLAN_CATALOGUE.find((p) => new RegExp(`\\b${p.dataGb}\\b`).test(input))
+    );
+  }
+
   private detectSensitiveInput(text: string): boolean {
     if (!text) return false;
     const cardPattern = /\b(?:\d[ -]*?){13,16}\b/;
@@ -944,15 +959,12 @@ export class ChatService {
           });
         }
 
-        const target = PLAN_CATALOGUE.find(
-          (p) =>
-            p.name.toLowerCase() === String(args.planName || '').toLowerCase() ||
-            String(args.planName || '').includes(`${p.dataGb}GB`),
-        );
+        const target = this.matchPlanFromCatalogue(args.planName);
         if (!target) {
           return JSON.stringify({
             success: false,
-            error: 'Requested plan not found or retired. Offer one of the 8 active JM Auto plans.',
+            error:
+              'Requested plan not found or retired. Offer one of the 7 active JM Auto plans (15GB, 45GB, 65GB, 100GB, 120GB, 150GB, or 180GB).',
           });
         }
 
@@ -1475,10 +1487,7 @@ export class ChatService {
           });
         }
 
-        const rawPlan = String(args.planName || '').toLowerCase();
-        const plan =
-          PLAN_CATALOGUE.find((p) => p.name.toLowerCase() === rawPlan || p.id.toLowerCase() === rawPlan) ||
-          PLAN_CATALOGUE.find((p) => rawPlan.includes(`${p.dataGb}gb`) || rawPlan.includes(String(p.dataGb)));
+        const plan = this.matchPlanFromCatalogue(args.planName);
         if (!plan) {
           return JSON.stringify({
             opened: false,

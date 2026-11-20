@@ -907,5 +907,54 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
     );
     expect(removed10.opened).toBe(false);
     expect(removed10.error).toMatch(/15GB, 45GB/);
+
+    // 150GB must resolve to 11144170 ($62), never collide with 15GB (11144154)
+    const emitted150: any[] = [];
+    const res150 = JSON.parse(
+      await chatService.executeToolCall(
+        'open_quickstream_card_form',
+        JSON.stringify({
+          custNo: '551059',
+          purpose: 'new_order',
+          planName: '150GB',
+          msn: '0412345678',
+        }),
+        [],
+        'sess-existing-1',
+        (act) => emitted150.push(act),
+      ),
+    );
+    expect(res150.opened).toBe(true);
+    expect(emitted150[0]).toEqual(
+      expect.objectContaining({
+        planNo: '11144170',
+        planPrice: 62,
+      }),
+    );
+  });
+
+  it('CarrierService.resolvePlanDetails maps all 7 active plans to their Octane planNo without 15GB/150GB collision', () => {
+    const service = new CarrierService({ getCollection: jest.fn() } as any, {} as any);
+    const expected = [
+      ['15GB', '11144154', 31],
+      ['45GB', '11144156', 36],
+      ['65GB', '11144157', 40],
+      ['100GB', '11144168', 48],
+      ['120GB', '11144169', 57],
+      ['150GB', '11144170', 62],
+      ['180GB', '11156014', 67],
+    ] as const;
+
+    for (const [label, expectedPlanNo, expectedPrice] of expected) {
+      const resolved = service.resolvePlanDetails(label);
+      expect(resolved).toEqual(
+        expect.objectContaining({
+          planNo: expectedPlanNo,
+          price: expectedPrice,
+        }),
+      );
+    }
+    expect(service.resolvePlanDetails('JM 10GB Auto')).toBeNull();
+    expect(service.resolvePlanDetails('JM 29GB Auto')).toBeNull();
   });
 });
