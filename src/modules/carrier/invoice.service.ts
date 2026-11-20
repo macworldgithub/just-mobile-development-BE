@@ -55,7 +55,7 @@ export class InvoiceService {
 
     let activePlanName = 'JM 65GB Auto';
     let activeDataGb = 65;
-    let amount = 37.55;
+    let amount = 40;
     let hasActivePlan = isTestCustomer;
 
     if (isLiveNumeric) {

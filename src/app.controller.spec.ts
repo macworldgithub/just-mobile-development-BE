@@ -551,7 +551,7 @@ describe('ChatService Registration & Inline QuickStream Flow', () => {
         authToken: 'jwt-chat-tok-1',
         purpose: 'port_order',
         planNo: '11144157',
-        planPrice: 37.55,
+        planPrice: 40,
       }),
     );
   });
@@ -861,7 +861,7 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
         JSON.stringify({
           custNo: '551059',
           purpose: 'port_order',
-          planName: 'JM 10GB Auto',
+          planName: 'JM 45GB Auto',
           numType: 'prepaid',
           donorCarrier: 'Vodafone',
         }),
@@ -872,6 +872,13 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
     );
     expect(qsRes.opened).toBe(true);
     expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toEqual(
+      expect.objectContaining({
+        planName: 'JM 45GB Auto',
+        planNo: '11144156',
+        planPrice: 36,
+      }),
+    );
     expect(emitted[0].orderDraft).toEqual(
       expect.objectContaining({
         custNo: '551059',
@@ -879,7 +886,26 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
         dob: '2002-11-23',
         donorCarrier: 'Vodafone',
         numType: 'prepaid',
+        planNo: '11144156',
+        pricePerMonth: 36,
       }),
     );
+
+    // Removed plans (10GB, 29GB) should be rejected cleanly
+    const removed10 = JSON.parse(
+      await chatService.executeToolCall(
+        'open_quickstream_card_form',
+        JSON.stringify({
+          custNo: '551059',
+          purpose: 'new_order',
+          planName: 'JM 10GB Auto',
+          msn: '0412345678',
+        }),
+        [],
+        'sess-existing-1',
+      ),
+    );
+    expect(removed10.opened).toBe(false);
+    expect(removed10.error).toMatch(/15GB, 45GB/);
   });
 });

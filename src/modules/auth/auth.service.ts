@@ -1439,7 +1439,7 @@ export class AuthService implements OnModuleInit {
         }
       } else if (custNoStr === 'CUST990001') {
         planName = matchedOrder?.planName || 'JM 65GB Auto';
-        planPrice = matchedOrder?.pricePerMonth || 37.55;
+        planPrice = matchedOrder?.pricePerMonth || 40;
       } else if (
         matchedOrder?.planName &&
         ['PENDING', 'PORT_IN_PROGRESS', 'PROCESSING'].includes(String(matchedOrder.status || '').toUpperCase())

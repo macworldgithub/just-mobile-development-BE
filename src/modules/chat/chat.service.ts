@@ -14,14 +14,13 @@ interface ChatMessage {
 }
 
 const PLAN_CATALOGUE = [
-  { id: 'plan-10gb', planNo: '11144153', name: 'JM 10GB Auto', price: 20.54, dataGb: 10 },
-  { id: 'plan-15gb', planNo: '11144154', name: 'JM 15GB Auto', price: 24.6, dataGb: 15 },
-  { id: 'plan-29gb', planNo: '11144155', name: 'JM 29GB Auto', price: 28.53, dataGb: 29 },
-  { id: 'plan-65gb', planNo: '11144157', name: 'JM 65GB Auto', price: 37.55, dataGb: 65 },
-  { id: 'plan-100gb', planNo: '11144168', name: 'JM 100GB Auto', price: 46.4, dataGb: 100 },
-  { id: 'plan-120gb', planNo: '11144169', name: 'JM 120GB Auto', price: 54.86, dataGb: 120 },
-  { id: 'plan-150gb', planNo: '11144170', name: 'JM 150GB Auto', price: 59.89, dataGb: 150 },
-  { id: 'plan-180gb', planNo: '11156014', name: 'JM 180GB Auto', price: 67.0, dataGb: 180 },
+  { id: 'plan-15gb', planNo: '11144154', name: 'JM 15GB Auto', price: 31, dataGb: 15 },
+  { id: 'plan-45gb', planNo: '11144156', name: 'JM 45GB Auto', price: 36, dataGb: 45 },
+  { id: 'plan-65gb', planNo: '11144157', name: 'JM 65GB Auto', price: 40, dataGb: 65 },
+  { id: 'plan-100gb', planNo: '11144168', name: 'JM 100GB Auto', price: 48, dataGb: 100 },
+  { id: 'plan-120gb', planNo: '11144169', name: 'JM 120GB Auto', price: 57, dataGb: 120 },
+  { id: 'plan-150gb', planNo: '11144170', name: 'JM 150GB Auto', price: 62, dataGb: 150 },
+  { id: 'plan-180gb', planNo: '11156014', name: 'JM 180GB Auto', price: 67, dataGb: 180 },
 ];
 
 @Injectable()
@@ -1483,7 +1482,7 @@ export class ChatService {
         if (!plan) {
           return JSON.stringify({
             opened: false,
-            error: 'Please select a valid JustMobile plan (10GB, 15GB, 29GB, 65GB, 100GB, 120GB, 150GB, or 180GB) first.',
+            error: 'Please select a valid JustMobile plan (15GB, 45GB, 65GB, 100GB, 120GB, 150GB, or 180GB) first.',
           });
         }
 

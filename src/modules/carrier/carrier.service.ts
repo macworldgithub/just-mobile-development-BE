@@ -92,14 +92,13 @@ export class CarrierService {
   private readonly soapClientCache = new Map<string, Promise<any>>();
 
   private readonly OCTANE_RETAIL_PLANS = [
-    { id: 'plan-10gb', planNo: '11144153', name: 'JM 10GB Auto', dataGb: 10, price: 20.54, network: '4G' },
-    { id: 'plan-15gb', planNo: '11144154', name: 'JM 15GB Auto', dataGb: 15, price: 24.6, network: '4G' },
-    { id: 'plan-29gb', planNo: '11144155', name: 'JM 29GB Auto', dataGb: 29, price: 28.53, network: '4G' },
-    { id: 'plan-65gb', planNo: '11144157', name: 'JM 65GB Auto', dataGb: 65, price: 37.55, network: '5G' },
-    { id: 'plan-100gb', planNo: '11144168', name: 'JM 100GB Auto', dataGb: 100, price: 46.4, network: '5G' },
-    { id: 'plan-120gb', planNo: '11144169', name: 'JM 120GB Auto', dataGb: 120, price: 54.86, network: '5G' },
-    { id: 'plan-150gb', planNo: '11144170', name: 'JM 150GB Auto', dataGb: 150, price: 59.89, network: '5G' },
-    { id: 'plan-180gb', planNo: '11156014', name: 'JM 180GB Auto', dataGb: 180, price: 67.0, network: '5G' },
+    { id: 'plan-15gb', planNo: '11144154', name: 'JM 15GB Auto', dataGb: 15, price: 31, network: '4G' },
+    { id: 'plan-45gb', planNo: '11144156', name: 'JM 45GB Auto', dataGb: 45, price: 36, network: '5G' },
+    { id: 'plan-65gb', planNo: '11144157', name: 'JM 65GB Auto', dataGb: 65, price: 40, network: '5G' },
+    { id: 'plan-100gb', planNo: '11144168', name: 'JM 100GB Auto', dataGb: 100, price: 48, network: '5G' },
+    { id: 'plan-120gb', planNo: '11144169', name: 'JM 120GB Auto', dataGb: 120, price: 57, network: '5G' },
+    { id: 'plan-150gb', planNo: '11144170', name: 'JM 150GB Auto', dataGb: 150, price: 62, network: '5G' },
+    { id: 'plan-180gb', planNo: '11156014', name: 'JM 180GB Auto', dataGb: 180, price: 67, network: '5G' },
   ];
 
   constructor(
@@ -1076,7 +1075,7 @@ export class CarrierService {
     const resolvedPlan = this.resolvePlanDetails(dto.planName, dto.planNo);
     const planNo = String(resolvedPlan?.planNo || dto.planNo || '11144157');
     const planName = resolvedPlan?.name || dto.planName || 'JM 65GB Auto';
-    const pricePerMonth = resolvedPlan?.price ?? dto.pricePerMonth ?? 37.55;
+    const pricePerMonth = resolvedPlan?.price ?? dto.pricePerMonth ?? 40;
     const isLive = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test((dto.custNo || '').trim());
     const customerProfile = await this.hydrateOrderCustomerProfile(dto.custNo, dto, isLive);
 
@@ -1284,7 +1283,7 @@ export class CarrierService {
     const resolvedPlan = this.resolvePlanDetails(dto.planName, dto.planNo);
     const planNo = String(resolvedPlan?.planNo || dto.planNo || '11144157');
     const planName = resolvedPlan?.name || dto.planName || 'JM 65GB Auto';
-    const pricePerMonth = resolvedPlan?.price ?? dto.pricePerMonth ?? 37.55;
+    const pricePerMonth = resolvedPlan?.price ?? dto.pricePerMonth ?? 40;
     const normalizedDob = this.normalizeDobIso(dto.dob);
     const cleanArn = dto.arn?.trim();
     const isLive = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test((dto.custNo || '').trim());
@@ -2003,7 +2002,7 @@ export class CarrierService {
         msn: cleanMsn,
         planNo: '11144157',
         planName: userDoc?.planName || 'JM 65GB Auto',
-        pricePerMonth: userDoc?.planPrice || 37.55,
+        pricePerMonth: userDoc?.planPrice || 40,
         status: 'ACTIVE',
         orderType: 'ESIM_REPLACEMENT',
         orderAction: 'CHANGE_WME_SIM',
@@ -2048,7 +2047,7 @@ export class CarrierService {
           orderId: carrierOrderId || existingOrder?.orderId || replacementRef,
           msn: cleanMsn,
           planName: existingOrder?.planName || userDoc?.planName || 'JustMobile eSIM Plan',
-          pricePerMonth: existingOrder?.pricePerMonth || userDoc?.planPrice || 37.55,
+          pricePerMonth: existingOrder?.pricePerMonth || userDoc?.planPrice || 40,
           lpaString,
           smdpAddress,
           activationCode,
@@ -2864,10 +2863,10 @@ export class CarrierService {
       hasActivePlan: true,
       currentBalance: 0.0,
       formattedBalance: '$0.00',
-      lastInvoiceAmount: 37.55,
+      lastInvoiceAmount: 40,
       lastInvoiceDate: cycle.lastInvoiceDate,
       nextInvoiceDate: cycle.nextInvoiceDate,
-      nextInvoiceAmount: 37.55,
+      nextInvoiceAmount: 40,
       autoPayStatus: 'Active',
       paymentMethod: 'Mastercard ending in 9001',
     };
