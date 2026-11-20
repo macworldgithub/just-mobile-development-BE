@@ -198,13 +198,21 @@ export class CarrierController {
 
   @Post('orders/activate')
   @HttpCode(HttpStatus.CREATED)
-  async activateNewOrder(@Body() body: Record<string, any>) {
+  async activateNewOrder(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body: Record<string, any>,
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader, body?.custNo);
     return this.carrierService.activateNewOrder(body as ActivateOrderInput);
   }
 
   @Post('orders/activate-port')
   @HttpCode(HttpStatus.CREATED)
-  async activatePortOrder(@Body() body: Record<string, any>) {
+  async activatePortOrder(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body: Record<string, any>,
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader, body?.custNo);
     return this.carrierService.activatePortOrder(body as ActivatePortOrderInput);
   }
 

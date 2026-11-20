@@ -46,6 +46,8 @@ export interface ActivatePortOrderInput extends ActivateOrderInput {
 
 export interface OrderRecord {
   orderId: string;
+  carrierOrderId?: string;
+  previousOrderIds?: string[];
   custNo: string;
   msn: string;
   planNo: string;
@@ -970,6 +972,92 @@ export class CarrierService {
   // 3. ORDER ACTIVATION (NEW ESIM & PORT-IN ESIM)
   // ==========================================================================
 
+  private normalizeMsn(raw?: string): string {
+    const digits = String(raw || '').replace(/\D+/g, '');
+    if (digits.startsWith('614') && digits.length >= 11) {
+      return `0${digits.slice(2, 11)}`;
+    }
+    if (digits.startsWith('4') && digits.length === 9) {
+      return `0${digits}`;
+    }
+    return digits || String(raw || '').replace(/\s+/g, '');
+  }
+
+  private normalizeDobIso(raw?: string): string | undefined {
+    const clean = String(raw || '').trim();
+    if (!clean) return undefined;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean;
+    const dmy = clean.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+    if (dmy) {
+      const [, dd, mm, yyyy] = dmy;
+      return `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+    }
+    return clean;
+  }
+
+  private getOctaneBillingCycleDate(): string {
+    const now = new Date();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const year = now.getFullYear();
+    return `27-${month}-${year}`;
+  }
+
+  private async hydrateOrderCustomerProfile(
+    custNo: string,
+    dto: {
+      email?: string;
+      firstName?: string;
+      lastName?: string;
+      address?: string;
+      suburb?: string;
+      state?: string;
+      postcode?: string;
+    },
+    isLive: boolean,
+  ) {
+    let email = dto.email?.trim() || '';
+    let firstName = dto.firstName?.trim() || '';
+    let lastName = dto.lastName?.trim() || '';
+    let address = dto.address?.trim() || '';
+    let suburb = dto.suburb?.trim() || '';
+    let state = dto.state?.trim() || '';
+    let postcode = dto.postcode?.trim() || '';
+
+    const userDoc: any = await this.findUserDoc(custNo).catch(() => null);
+    if (userDoc) {
+      email = email || userDoc.email || '';
+      firstName = firstName || userDoc.firstName || String(userDoc.name || '').split(' ')[0] || '';
+      lastName = lastName || userDoc.surname || String(userDoc.name || '').split(' ').slice(1).join(' ') || '';
+      address = address || userDoc.address || '';
+      suburb = suburb || userDoc.suburb || '';
+      state = state || userDoc.state || '';
+      postcode = postcode || userDoc.postcode || '';
+    }
+
+    if (isLive && (!address || !suburb || !postcode || !email)) {
+      const liveCust: any = await this.getCustomer(custNo).catch(() => null);
+      if (liveCust) {
+        email = email || liveCust.email || '';
+        firstName = firstName || liveCust.firstName || '';
+        lastName = lastName || liveCust.surname || '';
+        address = address || liveCust.address || '';
+        suburb = suburb || liveCust.suburb || '';
+        state = state || liveCust.state || '';
+        postcode = postcode || liveCust.postcode || '';
+      }
+    }
+
+    return {
+      email: email || 'info@justmobile.ai',
+      firstName: firstName || undefined,
+      lastName: lastName || undefined,
+      address: address || 'George St',
+      suburb: suburb || 'Sydney',
+      state: state || 'NSW',
+      postcode: postcode || '2000',
+    };
+  }
+
   /**
    * Activate New eSIM Service (ADD_WME_NEW)
    */
@@ -984,11 +1072,13 @@ export class CarrierService {
     emailSent?: boolean;
     emailRecipient?: string;
   }> {
-    const msn = dto.msn.replace(/\s+/g, '');
-    const planNo = dto.planNo || '11144157';
-    const planName = dto.planName || 'JM 65GB Auto';
-    const pricePerMonth = dto.pricePerMonth || 37.55;
+    const msn = this.normalizeMsn(dto.msn);
+    const resolvedPlan = this.resolvePlanDetails(dto.planName, dto.planNo);
+    const planNo = String(resolvedPlan?.planNo || dto.planNo || '11144157');
+    const planName = resolvedPlan?.name || dto.planName || 'JM 65GB Auto';
+    const pricePerMonth = resolvedPlan?.price ?? dto.pricePerMonth ?? 37.55;
     const isLive = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test((dto.custNo || '').trim());
+    const customerProfile = await this.hydrateOrderCustomerProfile(dto.custNo, dto, isLive);
 
     let orderId = `ORD-${Math.floor(100000 + Math.random() * 900000)}`;
 
@@ -1003,19 +1093,19 @@ export class CarrierService {
             wmeNewReqItem: {
               lineType: 'R',
               lineName: 'SimplyBig Unlimited',
-              planNo,
+              planNo: Number(planNo),
               agentId: '923',
               msn,
               isEsim: true,
               isQRCode: true,
               cycleNo: '28',
               spendCode: '80610',
-              notificationEmail: dto.email || 'info@justmobile.ai',
+              notificationEmail: customerProfile.email,
               orderItemAddress: {
-                locality: dto.suburb || 'Sydney',
-                postcode: dto.postcode || '2000',
-                streetName: (dto.address || 'George St').split(',')[0].trim(),
-                additionalAddress: (dto.address || 'CBD').slice(0, 10),
+                locality: customerProfile.suburb,
+                postcode: customerProfile.postcode,
+                streetName: customerProfile.address.split(',')[0].trim(),
+                additionalAddress: customerProfile.address.slice(0, 10),
               },
             },
           },
@@ -1058,11 +1148,11 @@ export class CarrierService {
           isQRcode: true,
           ...(esimDetails.lpaString ? { lpaString: esimDetails.lpaString } : {}),
           ...(esimDetails.activationCode ? { activationCode: esimDetails.activationCode } : {}),
-          address: dto.address,
-          suburb: dto.suburb,
-          state: dto.state,
-          postcode: dto.postcode,
-          email: dto.email,
+          address: customerProfile.address,
+          suburb: customerProfile.suburb,
+          state: customerProfile.state,
+          postcode: customerProfile.postcode,
+          email: customerProfile.email,
           createdAt: now,
           updatedAt: now,
         },
@@ -1076,9 +1166,9 @@ export class CarrierService {
       msn,
       planName,
       pricePerMonth,
-      email: dto.email,
-      firstName: dto.firstName,
-      lastName: dto.lastName,
+      email: customerProfile.email,
+      firstName: customerProfile.firstName,
+      lastName: customerProfile.lastName,
       lpaString: esimDetails.lpaString,
       smdpAddress: esimDetails.smdpAddress,
       activationCode: esimDetails.activationCode,
@@ -1190,11 +1280,21 @@ export class CarrierService {
     emailSent?: boolean;
     emailRecipient?: string;
   }> {
-    const msn = dto.msn.replace(/\s+/g, '');
-    const planNo = dto.planNo || '11144157';
-    const planName = dto.planName || 'JM 65GB Auto';
-    const pricePerMonth = dto.pricePerMonth || 37.55;
+    const msn = this.normalizeMsn(dto.msn);
+    const resolvedPlan = this.resolvePlanDetails(dto.planName, dto.planNo);
+    const planNo = String(resolvedPlan?.planNo || dto.planNo || '11144157');
+    const planName = resolvedPlan?.name || dto.planName || 'JM 65GB Auto';
+    const pricePerMonth = resolvedPlan?.price ?? dto.pricePerMonth ?? 37.55;
+    const normalizedDob = this.normalizeDobIso(dto.dob);
+    const cleanArn = dto.arn?.trim();
     const isLive = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test((dto.custNo || '').trim());
+
+    if (dto.numType === 'prepaid' && (!normalizedDob || normalizedDob.length < 6)) {
+      throw new BadRequestException('Valid Date of Birth is required to transfer a prepaid mobile number.');
+    }
+    if (dto.numType === 'postpaid' && (!cleanArn || cleanArn.length < 3)) {
+      throw new BadRequestException('Valid Account Number is required to transfer a postpaid mobile number.');
+    }
 
     const ordersCol = this.db.getCollection<OrderRecord>('orders');
     const existingPendingPort = await ordersCol.findOne({
@@ -1208,6 +1308,7 @@ export class CarrierService {
       );
     }
 
+    const customerProfile = await this.hydrateOrderCustomerProfile(dto.custNo, dto, isLive);
     let orderId = `PORT-${Math.floor(100000 + Math.random() * 900000)}`;
 
     if (isLive) {
@@ -1220,20 +1321,20 @@ export class CarrierService {
           orderItems: {
             wmePortInReqItem: {
               lineType: 'R',
-              planNo,
+              planNo: Number(planNo),
               agentId: '923',
               msn,
               isEsim: true,
               isQRCode: true,
               cycleNo: '28',
               spendCode: '80610',
-              notificationEmail: dto.email || 'info@justmobile.ai',
-              ...(dto.numType === 'prepaid' ? { dob: dto.dob } : { arn: dto.arn }),
+              notificationEmail: customerProfile.email,
+              ...(dto.numType === 'prepaid' ? { dob: normalizedDob } : { arn: cleanArn }),
               orderItemAddress: {
-                locality: dto.suburb || 'Sydney',
-                postcode: dto.postcode || '2000',
-                streetName: (dto.address || 'George St').split(',')[0].trim(),
-                additionalAddress: (dto.address || 'CBD').slice(0, 10),
+                locality: customerProfile.suburb,
+                postcode: customerProfile.postcode,
+                streetName: customerProfile.address.split(',')[0].trim(),
+                additionalAddress: customerProfile.address.slice(0, 10),
               },
             },
           },
@@ -1275,13 +1376,13 @@ export class CarrierService {
           ...(esimDetails.lpaString ? { lpaString: esimDetails.lpaString } : {}),
           ...(esimDetails.activationCode ? { activationCode: esimDetails.activationCode } : {}),
           numType: dto.numType,
-          dob: dto.dob,
-          arn: dto.arn,
-          address: dto.address,
-          suburb: dto.suburb,
-          state: dto.state,
-          postcode: dto.postcode,
-          email: dto.email,
+          dob: normalizedDob,
+          arn: cleanArn,
+          address: customerProfile.address,
+          suburb: customerProfile.suburb,
+          state: customerProfile.state,
+          postcode: customerProfile.postcode,
+          email: customerProfile.email,
           createdAt: now,
           updatedAt: now,
         },
@@ -1295,9 +1396,9 @@ export class CarrierService {
       msn,
       planName,
       pricePerMonth,
-      email: dto.email,
-      firstName: dto.firstName,
-      lastName: dto.lastName,
+      email: customerProfile.email,
+      firstName: customerProfile.firstName,
+      lastName: customerProfile.lastName,
       lpaString: esimDetails.lpaString,
       smdpAddress: esimDetails.smdpAddress,
       activationCode: esimDetails.activationCode,
@@ -1340,8 +1441,8 @@ export class CarrierService {
     }
 
     const effectiveNumType = dto.numType || order.numType || 'prepaid';
-    const effectiveDob = dto.dob !== undefined ? dto.dob : order.dob;
-    const effectiveArn = dto.arn !== undefined ? dto.arn : order.arn;
+    const effectiveDob = this.normalizeDobIso(dto.dob !== undefined ? dto.dob : order.dob);
+    const effectiveArn = (dto.arn !== undefined ? dto.arn : order.arn)?.trim();
     const effectiveDonor = dto.donorCarrier || order.donorCarrier || 'Optus';
 
     if (effectiveNumType === 'prepaid' && (!effectiveDob || effectiveDob.trim().length < 4)) {
@@ -1352,10 +1453,13 @@ export class CarrierService {
     }
 
     const isLive = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test((order.custNo || '').trim());
+    let nextCarrierOrderId: string | undefined;
+
     if (isLive) {
+      const customerProfile = await this.hydrateOrderCustomerProfile(order.custNo, order, true);
       this.logger.warn(`[LIVE CARRIER CALL] Resubmitting ADD_WME_PORT to Octane for order ${orderId} with updated credentials.`);
       try {
-        const msn = order.msn.replace(/\s+/g, '');
+        const msn = this.normalizeMsn(order.msn);
         const result: any = await this.soapCall('/UtbOrder', 'orderCreate', {
           createRequest: {
             custNo: order.custNo,
@@ -1364,20 +1468,29 @@ export class CarrierService {
             orderItems: {
               wmePortInReqItem: {
                 lineType: 'R',
-                planNo: order.planNo,
+                planNo: Number(order.planNo || '11144157'),
                 agentId: '923',
                 msn,
                 isEsim: true,
                 isQRCode: true,
                 cycleNo: '28',
                 spendCode: '80610',
-                notificationEmail: order.email || 'info@justmobile.ai',
+                notificationEmail: customerProfile.email,
                 ...(effectiveNumType === 'prepaid' ? { dob: effectiveDob } : { arn: effectiveArn }),
+                orderItemAddress: {
+                  locality: customerProfile.suburb,
+                  postcode: customerProfile.postcode,
+                  streetName: customerProfile.address.split(',')[0].trim(),
+                  additionalAddress: customerProfile.address.slice(0, 10),
+                },
               },
             },
           },
         });
-        this.assertOctaneSoapSuccess('ADD_WME_PORT resubmission', result);
+        const ret = this.assertOctaneSoapSuccess('ADD_WME_PORT resubmission', result);
+        if (ret?.orderId) {
+          nextCarrierOrderId = String(ret.orderId);
+        }
       } catch (err: any) {
         this.logger.error(`Live port order resubmission failed: ${err.message}`);
         if (err instanceof HttpException) throw err;
@@ -1386,10 +1499,14 @@ export class CarrierService {
     }
 
     const now = new Date();
+    const targetOrderId = nextCarrierOrderId || orderId;
     await ordersCol.updateOne(
       { orderId },
       {
         $set: {
+          ...(nextCarrierOrderId && nextCarrierOrderId !== orderId
+            ? { orderId: nextCarrierOrderId, carrierOrderId: nextCarrierOrderId }
+            : {}),
           status: 'PORT_IN_PROGRESS',
           numType: effectiveNumType,
           dob: effectiveDob,
@@ -1400,10 +1517,13 @@ export class CarrierService {
           portRetries: (order.portRetries || 0) + 1,
           updatedAt: now,
         },
+        ...(nextCarrierOrderId && nextCarrierOrderId !== orderId
+          ? { $push: { previousOrderIds: orderId } as any }
+          : {}),
       },
     );
 
-    const updated = await ordersCol.findOne({ orderId });
+    const updated = await ordersCol.findOne({ orderId: targetOrderId });
     this.logger.log(`✓ Port order #${orderId} resubmitted to ${effectiveDonor}. Status changed to PORT_IN_PROGRESS.`);
 
     return {
@@ -2161,7 +2281,7 @@ export class CarrierService {
     if (isLive) {
       const liveSvc = await this.resolveLiveServiceLine(cleanCustNo, dto.msn);
       effectiveMsn = liveSvc.msn || cleanMsn;
-      const custReqDate = new Date().toISOString().split('T')[0];
+      const custReqDate = this.getOctaneBillingCycleDate();
 
       this.logger.warn(
         `[LIVE CARRIER CALL] Submitting CHANGE_WME_PLAN to Octane for ${cleanCustNo} (lineSeqNo=${liveSvc.lineSeqNo}, planno=${targetPlanNo})`,

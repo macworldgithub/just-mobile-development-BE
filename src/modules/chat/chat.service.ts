@@ -1,8 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { MailService } from '../mail/mail.service';
 import { CarrierService } from '../carrier/carrier.service';
 import { InvoiceService } from '../carrier/invoice.service';
+import { AuthService } from '../auth/auth.service';
 import { BELE_SYSTEM_PROMPT } from './chat-prompt';
 
 interface ChatMessage {
@@ -13,14 +14,14 @@ interface ChatMessage {
 }
 
 const PLAN_CATALOGUE = [
-  { id: 'plan-10gb', name: 'JM 10GB Auto', price: 20.54, dataGb: 10 },
-  { id: 'plan-15gb', name: 'JM 15GB Auto', price: 24.6, dataGb: 15 },
-  { id: 'plan-29gb', name: 'JM 29GB Auto', price: 28.53, dataGb: 29 },
-  { id: 'plan-65gb', name: 'JM 65GB Auto', price: 37.55, dataGb: 65 },
-  { id: 'plan-100gb', name: 'JM 100GB Auto', price: 46.4, dataGb: 100 },
-  { id: 'plan-120gb', name: 'JM 120GB Auto', price: 54.86, dataGb: 120 },
-  { id: 'plan-150gb', name: 'JM 150GB Auto', price: 59.89, dataGb: 150 },
-  { id: 'plan-180gb', name: 'JM 180GB Auto', price: 67.0, dataGb: 180 },
+  { id: 'plan-10gb', planNo: '11144153', name: 'JM 10GB Auto', price: 20.54, dataGb: 10 },
+  { id: 'plan-15gb', planNo: '11144154', name: 'JM 15GB Auto', price: 24.6, dataGb: 15 },
+  { id: 'plan-29gb', planNo: '11144155', name: 'JM 29GB Auto', price: 28.53, dataGb: 29 },
+  { id: 'plan-65gb', planNo: '11144157', name: 'JM 65GB Auto', price: 37.55, dataGb: 65 },
+  { id: 'plan-100gb', planNo: '11144168', name: 'JM 100GB Auto', price: 46.4, dataGb: 100 },
+  { id: 'plan-120gb', planNo: '11144169', name: 'JM 120GB Auto', price: 54.86, dataGb: 120 },
+  { id: 'plan-150gb', planNo: '11144170', name: 'JM 150GB Auto', price: 59.89, dataGb: 150 },
+  { id: 'plan-180gb', planNo: '11156014', name: 'JM 180GB Auto', price: 67.0, dataGb: 180 },
 ];
 
 @Injectable()
@@ -32,7 +33,32 @@ export class ChatService {
     private readonly mailService: MailService,
     private readonly carrierService: CarrierService,
     private readonly invoiceService: InvoiceService,
+    @Inject(forwardRef(() => AuthService))
+    private readonly authService: AuthService,
   ) {}
+
+  private normalizeChatMsn(raw?: string): string {
+    const digits = String(raw || '').replace(/\D+/g, '');
+    if (digits.startsWith('614') && digits.length >= 11) {
+      return `0${digits.slice(2, 11)}`;
+    }
+    if (digits.startsWith('4') && digits.length === 9) {
+      return `0${digits}`;
+    }
+    return digits;
+  }
+
+  private normalizeChatDob(raw?: string): string {
+    const clean = String(raw || '').trim();
+    if (!clean) return '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean;
+    const dmy = clean.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+    if (dmy) {
+      const [, dd, mm, yyyy] = dmy;
+      return `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+    }
+    return clean;
+  }
 
   private maskEmail(email: string): string {
     const clean = (email || '').trim();
@@ -472,14 +498,138 @@ export class ChatService {
           },
         },
       },
+      {
+        type: 'function',
+        function: {
+          name: 'send_signup_verification_code',
+          description:
+            'Send a 6-digit email verification code to register a brand new JustMobile customer inside chat.',
+          parameters: {
+            type: 'object',
+            properties: {
+              email: { type: 'string', description: 'New customer email address' },
+            },
+            required: ['email'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'register_new_customer',
+          description:
+            'Complete customer registration with Octane and MongoDB after verifying the 6-digit signup email OTP. Automatically verifies the current chat session for the new customer.',
+          parameters: {
+            type: 'object',
+            properties: {
+              firstName: { type: 'string' },
+              surname: { type: 'string' },
+              email: { type: 'string' },
+              phone: { type: 'string', description: 'Optional existing Australian mobile number or empty if getting a new number' },
+              dob: { type: 'string', description: 'Date of birth in YYYY-MM-DD or DD/MM/YYYY format' },
+              address: { type: 'string', description: 'Australian street address' },
+              suburb: { type: 'string' },
+              state: { type: 'string', description: 'Australian state code e.g. NSW, VIC, QLD, SA, WA, TAS, ACT, NT' },
+              postcode: { type: 'string', description: '4-digit Australian postcode' },
+              password: { type: 'string', description: 'Account password (minimum 6 characters) for logging into /login and /account' },
+              code: { type: 'string', description: '6-digit email verification code' },
+            },
+            required: ['firstName', 'surname', 'email', 'dob', 'address', 'suburb', 'state', 'postcode', 'password', 'code'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'get_available_numbers',
+          description:
+            'Fetch live available 04XX mobile numbers from Telstra Wholesale reserve pool so a verified customer can pick a new number in chat.',
+          parameters: {
+            type: 'object',
+            properties: {
+              qty: { type: 'number', description: 'Number of options to return (default 5)' },
+            },
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'check_port_eligibility',
+          description: 'Validate whether an existing Australian 04XX mobile number is eligible for number transfer (port-in).',
+          parameters: {
+            type: 'object',
+            properties: {
+              number: { type: 'string', description: 'Australian 04XX mobile number' },
+            },
+            required: ['number'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'send_port_sms_otp',
+          description:
+            'Send ACMA mandatory pre-port SMS 2FA OTP to the customer existing mobile number before transferring it (requires verified chat session).',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string' },
+              destination: { type: 'string', description: 'Existing 04XX mobile number being transferred' },
+            },
+            required: ['custNo', 'destination'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'verify_port_sms_otp',
+          description:
+            'Verify the 6-digit ACMA pre-port SMS OTP entered by the customer before opening QuickStream payment checkout.',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string' },
+              code: { type: 'string' },
+              transactionId: { type: 'string' },
+            },
+            required: ['custNo', 'code'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'open_quickstream_card_form',
+          description:
+            'Open the secure Westpac QuickStream card iframe right inside the chat widget so the customer can register their Direct Debit card in Octane (never collect card details as chat text). For new_order or port_order, activation proceeds immediately after the card is saved.',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string' },
+              purpose: { type: 'string', enum: ['new_order', 'port_order', 'update_card'] },
+              planName: { type: 'string', description: 'Required for new_order or port_order e.g. JM 65GB Auto' },
+              msn: { type: 'string', description: 'Selected 04XX number or porting number (required for new_order / port_order)' },
+              numType: { type: 'string', enum: ['prepaid', 'postpaid'], description: 'Required for port_order' },
+              donorCarrier: { type: 'string', description: 'Current carrier e.g. Telstra, Optus, Vodafone' },
+              arn: { type: 'string', description: 'Postpaid account number (required for postpaid port_order)' },
+              dob: { type: 'string', description: 'Date of birth YYYY-MM-DD (required for prepaid port_order)' },
+            },
+            required: ['custNo', 'purpose'],
+          },
+        },
+      },
     ];
   }
 
-  private async executeToolCall(
+  async executeToolCall(
     name: string,
     rawArgs: string,
     conversationMessages: Array<{ role: string; content: string }>,
     sessionId?: string,
+    onUiAction?: (action: any) => void,
   ): Promise<string> {
     let args: Record<string, any> = {};
     try {
@@ -1131,6 +1281,266 @@ export class ChatService {
         return JSON.stringify({ error: 'Provide a referenceId or verified custNo.' });
       }
 
+      if (name === 'send_signup_verification_code') {
+        const cleanEmail = String(args.email || '').trim().toLowerCase();
+        const res = await this.authService.sendVerificationCode(cleanEmail, 'signup');
+        return JSON.stringify({
+          sent: true,
+          email: cleanEmail,
+          message: `${res.message} Ask the customer for the 6-digit verification code from their inbox to complete registration.`,
+        });
+      }
+
+      if (name === 'register_new_customer') {
+        const signupRes = await this.authService.signup({
+          custType: 'R',
+          firstName: String(args.firstName || '').trim(),
+          surname: String(args.surname || '').trim(),
+          name: `${String(args.firstName || '').trim()} ${String(args.surname || '').trim()}`.trim(),
+          email: String(args.email || '').trim(),
+          phone: args.phone ? this.normalizeChatMsn(args.phone) : '',
+          password: String(args.password || ''),
+          dob: this.normalizeChatDob(args.dob),
+          address: String(args.address || '').trim(),
+          suburb: String(args.suburb || '').trim(),
+          state: String(args.state || '').trim().toUpperCase(),
+          postcode: String(args.postcode || '').trim(),
+          code: String(args.code || '').trim(),
+        });
+
+        const assignedCustNo = String(signupRes?.user?.custNo || '');
+        if (assignedCustNo) {
+          await this.db.getCollection('chat_sessions').updateOne(
+            { sessionId: cleanSessionId },
+            {
+              $set: {
+                sessionId: cleanSessionId,
+                custNo: assignedCustNo,
+                active: true,
+                verifiedAt: new Date(),
+                expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+                updatedAt: new Date(),
+              },
+            },
+            { upsert: true },
+          );
+        }
+
+        return JSON.stringify({
+          registered: true,
+          custNo: assignedCustNo,
+          name: signupRes?.user?.name,
+          email: signupRes?.user?.email,
+          portalHint: 'Customer can also log into /login and manage their service in /account anytime.',
+          message: signupRes?.message || `Customer account #${assignedCustNo} created and verified.`,
+        });
+      }
+
+      if (name === 'get_available_numbers') {
+        const res = await this.carrierService.reserveNumbers(Number(args.qty) || 5);
+        return JSON.stringify({
+          numbers: res?.numbers || [],
+        });
+      }
+
+      if (name === 'check_port_eligibility') {
+        const msn = this.normalizeChatMsn(args.number);
+        const res = await this.carrierService.checkNumber(msn);
+        return JSON.stringify(res);
+      }
+
+      if (name === 'send_port_sms_otp') {
+        const custNo = String(args.custNo || '').trim();
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
+          return JSON.stringify({ sent: false, error: 'Identity verification required first.' });
+        }
+        const destination = this.normalizeChatMsn(args.destination);
+        const res = await this.carrierService.sendPrePortOtp(custNo, destination);
+        await this.db.getCollection('chat_sessions').updateOne(
+          { sessionId: cleanSessionId, active: true },
+          {
+            $set: {
+              portOtpTransactionId: res.transactionId,
+              portOtpDestination: destination,
+              portOtpVerified: false,
+              updatedAt: new Date(),
+            },
+          },
+        );
+        return JSON.stringify({
+          sent: true,
+          transactionId: res.transactionId,
+          destination,
+          message: res.message,
+        });
+      }
+
+      if (name === 'verify_port_sms_otp') {
+        const custNo = String(args.custNo || '').trim();
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
+          return JSON.stringify({ verified: false, error: 'Identity verification required first.' });
+        }
+        const sessionDoc: any = await this.db
+          .getCollection('chat_sessions')
+          .findOne({ sessionId: cleanSessionId, active: true, expiresAt: { $gt: new Date() } });
+        const txId = String(args.transactionId || sessionDoc?.portOtpTransactionId || '').trim();
+        if (!txId) {
+          return JSON.stringify({ verified: false, error: 'No SMS OTP session found. Please call send_port_sms_otp first.' });
+        }
+        const res = await this.carrierService.verifyPrePortOtp(txId, String(args.code || ''));
+        await this.db.getCollection('chat_sessions').updateOne(
+          { sessionId: cleanSessionId, active: true },
+          {
+            $set: {
+              portOtpVerified: true,
+              portOtpVerifiedNumber: sessionDoc?.portOtpDestination || '',
+              updatedAt: new Date(),
+            },
+          },
+        );
+        return JSON.stringify({
+          verified: Boolean(res?.verified),
+          transactionId: txId,
+          destination: sessionDoc?.portOtpDestination || '',
+          message: res.message,
+        });
+      }
+
+      if (name === 'open_quickstream_card_form') {
+        const custNo = String(args.custNo || '').trim();
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
+          return JSON.stringify({ opened: false, error: 'Please verify your account or register first.' });
+        }
+
+        const purpose = String(args.purpose || 'new_order') as 'new_order' | 'port_order' | 'update_card';
+        if (!['new_order', 'port_order', 'update_card'].includes(purpose)) {
+          return JSON.stringify({ opened: false, error: 'Invalid payment form purpose.' });
+        }
+
+        if (purpose === 'update_card') {
+          const authToken = await this.authService.issueTokenForCustomer(custNo);
+          onUiAction?.({
+            type: 'QUICKSTREAM_PAYMENT',
+            custNo,
+            authToken,
+            purpose: 'update_card',
+            planName: 'JustMobile Direct Debit (Billing Cycle 28th)',
+          });
+          return JSON.stringify({
+            opened: true,
+            purpose: 'update_card',
+            message: 'Secure Westpac QuickStream payment card form opened below in chat. Customer can also manage cards anytime in /account.',
+          });
+        }
+
+        const rawPlan = String(args.planName || '').toLowerCase();
+        const plan =
+          PLAN_CATALOGUE.find((p) => p.name.toLowerCase() === rawPlan || p.id.toLowerCase() === rawPlan) ||
+          PLAN_CATALOGUE.find((p) => rawPlan.includes(`${p.dataGb}gb`) || rawPlan.includes(String(p.dataGb)));
+        if (!plan) {
+          return JSON.stringify({
+            opened: false,
+            error: 'Please select a valid JustMobile plan (10GB, 15GB, 29GB, 65GB, 100GB, 120GB, 150GB, or 180GB) first.',
+          });
+        }
+
+        const msn = this.normalizeChatMsn(args.msn);
+        if (!msn || msn.length < 10) {
+          return JSON.stringify({
+            opened: false,
+            error: 'Please select an available 04XX mobile number or provide your 10-digit Australian mobile number first.',
+          });
+        }
+
+        let numType: 'prepaid' | 'postpaid' | undefined;
+        let cleanDob: string | undefined;
+        let cleanArn: string | undefined;
+
+        if (purpose === 'port_order') {
+          numType = args.numType === 'prepaid' ? 'prepaid' : args.numType === 'postpaid' ? 'postpaid' : undefined;
+          if (!numType) {
+            return JSON.stringify({ opened: false, error: 'Please specify whether your existing number is prepaid or postpaid.' });
+          }
+          cleanDob = this.normalizeChatDob(args.dob);
+          cleanArn = String(args.arn || '').trim();
+          if (numType === 'prepaid' && !cleanDob) {
+            return JSON.stringify({ opened: false, error: 'Date of Birth is required for prepaid number transfers.' });
+          }
+          if (numType === 'postpaid' && !cleanArn) {
+            return JSON.stringify({ opened: false, error: 'Current provider Account Number is required for postpaid number transfers.' });
+          }
+
+          const sessionDoc: any = await this.db
+            .getCollection('chat_sessions')
+            .findOne({ sessionId: cleanSessionId, active: true, expiresAt: { $gt: new Date() } });
+          if (!sessionDoc?.portOtpVerified || (sessionDoc?.portOtpVerifiedNumber && sessionDoc.portOtpVerifiedNumber !== msn)) {
+            return JSON.stringify({
+              opened: false,
+              requiresPortOtp: true,
+              error: `ACMA SMS OTP verification is required on ${msn} before opening payment checkout. Call send_port_sms_otp and verify_port_sms_otp first.`,
+            });
+          }
+
+          const existingPendingPort = await this.db.getCollection('orders').findOne({
+            msn,
+            orderType: 'PORT_IN',
+            status: { $in: ['PENDING', 'PORT_IN_PROGRESS'] },
+          });
+          if (existingPendingPort) {
+            return JSON.stringify({
+              opened: false,
+              duplicatePort: true,
+              error: `A mobile number transfer for ${msn} is already in progress (Order #${existingPendingPort.orderId}). Please wait for completion or cancel it first.`,
+            });
+          }
+        }
+
+        const customer = await this.findCustomerByIdentifier(custNo);
+        const authToken = await this.authService.issueTokenForCustomer(custNo);
+        const orderDraft = {
+          custNo,
+          msn,
+          planNo: plan.planNo,
+          planName: plan.name,
+          pricePerMonth: plan.price,
+          email: customer?.email || '',
+          firstName: customer?.firstName || String(customer?.name || '').split(' ')[0] || '',
+          lastName: customer?.surname || String(customer?.name || '').split(' ').slice(1).join(' ') || '',
+          address: customer?.address || '',
+          suburb: customer?.suburb || '',
+          state: customer?.state || 'NSW',
+          postcode: customer?.postcode || '',
+          ...(purpose === 'port_order'
+            ? {
+                numType,
+                donorCarrier: args.donorCarrier || 'Optus',
+                ...(numType === 'prepaid' ? { dob: cleanDob } : { arn: cleanArn }),
+              }
+            : {}),
+        };
+
+        onUiAction?.({
+          type: 'QUICKSTREAM_PAYMENT',
+          custNo,
+          authToken,
+          purpose,
+          planName: plan.name,
+          planNo: plan.planNo,
+          planPrice: plan.price,
+          orderDraft,
+        });
+
+        return JSON.stringify({
+          opened: true,
+          purpose,
+          planName: plan.name,
+          planPrice: plan.price,
+          msn,
+          message:
+            'The secure Westpac QuickStream payment card form is now open inline below inside this chat window. Ask the customer to complete card setup inside the secure frame to activate their eSIM (they can also log into /account anytime).',
+        });
+      }
+
       return JSON.stringify({ error: `Unknown tool: ${name}` });
     } catch (err: any) {
       this.logger.error(`Chat tool ${name} error: ${err.message}`);
@@ -1183,8 +1593,9 @@ export class ChatService {
       ];
 
       const tools = this.getToolsSchema();
+      let pendingUiAction: any = null;
 
-      for (let step = 0; step < 5; step++) {
+      for (let step = 0; step < 6; step++) {
         const res = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: {
@@ -1196,7 +1607,7 @@ export class ChatService {
             messages: apiMessages,
             tools,
             tool_choice: 'auto',
-            max_tokens: 600,
+            max_tokens: 750,
             temperature: 0.35,
           }),
         });
@@ -1227,6 +1638,9 @@ export class ChatService {
               tc.function?.arguments,
               messages,
               sessionId,
+              (action) => {
+                pendingUiAction = action;
+              },
             );
             apiMessages.push({
               role: 'tool',
@@ -1238,7 +1652,10 @@ export class ChatService {
         }
 
         const reply = assistantMessage.content || 'How can I help with your JustMobile service today?';
-        return { reply };
+        return {
+          reply,
+          ...(pendingUiAction ? { uiAction: pendingUiAction } : {}),
+        };
       }
 
       return {

@@ -1159,6 +1159,35 @@ export class AuthService implements OnModuleInit {
     }
   }
 
+  async issueTokenForCustomer(custNo: string): Promise<string> {
+    const cleanCustNo = String(custNo || '').trim();
+    if (!cleanCustNo) {
+      throw new BadRequestException('Customer number is required.');
+    }
+    const usersCol = this.db.getCollection<UserDocument>('users');
+    const digits = cleanCustNo.replace(/\D+/g, '');
+    const numericVal = digits ? parseInt(digits, 10) : NaN;
+    const orClauses: any[] = [{ custNo: cleanCustNo }];
+    if (!isNaN(numericVal)) {
+      orClauses.push({ custNo: numericVal });
+    }
+    const user = await usersCol.findOne({ $or: orClauses });
+    if (!user) {
+      throw new UnauthorizedException('Account not found.');
+    }
+    return jwt.sign(
+      {
+        sub: String(user._id),
+        email: user.email,
+        role: user.role,
+        name: user.name,
+        custNo: user.custNo,
+      },
+      this.jwtSecret,
+      { expiresIn: '1h' },
+    );
+  }
+
   async verifyCustomerAccess(
     authHeader: string | undefined,
     expectedCustNo?: string,
