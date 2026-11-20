@@ -361,6 +361,24 @@ export class ChatService {
       {
         type: 'function',
         function: {
+          name: 'cancel_pending_port_transfer',
+          description:
+            'Cancel an in-progress or pending mobile number transfer (port-in) order via Octane orderCancel (requires OTP verification and explicit customer confirmation).',
+          parameters: {
+            type: 'object',
+            properties: {
+              custNo: { type: 'string' },
+              orderId: { type: 'string', description: 'Optional specific port order ID' },
+              confirmed: { type: 'boolean', description: 'True only after customer explicitly confirms' },
+              reason: { type: 'string' },
+            },
+            required: ['custNo', 'confirmed'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
           name: 'send_invoice_copy',
           description:
             'Retrieve and email/link a copy of the latest or requested ATO tax invoice PDF (requires OTP verification).',
@@ -841,6 +859,54 @@ export class ChatService {
         });
       }
 
+      if (name === 'cancel_pending_port_transfer') {
+        const custNo = String(args.custNo || '').trim();
+        if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
+          return JSON.stringify({ success: false, error: 'OTP verification required first.' });
+        }
+        const ordersCol = this.db.getCollection('orders');
+        const targetOrder = args.orderId
+          ? await ordersCol.findOne({ custNo, orderId: String(args.orderId).trim(), orderType: 'PORT_IN' })
+          : await ordersCol.findOne(
+              { custNo, orderType: 'PORT_IN', status: { $in: ['PENDING', 'PORT_IN_PROGRESS'] } },
+              { sort: { createdAt: -1 } },
+            );
+
+        if (!targetOrder) {
+          return JSON.stringify({
+            cancelled: false,
+            message: 'No pending or in-progress mobile number transfer found on your account.',
+          });
+        }
+        if (args.confirmed !== true) {
+          return JSON.stringify({
+            requiresConfirmation: true,
+            orderId: targetOrder.orderId,
+            msn: targetOrder.msn,
+            status: targetOrder.status,
+            message: `Please confirm you want to cancel your pending number transfer for ${targetOrder.msn} (Order #${targetOrder.orderId}).`,
+          });
+        }
+
+        const res = await this.carrierService.cancelPortOrder(custNo, targetOrder.orderId, args.reason);
+        const user = await this.findCustomerByIdentifier(custNo);
+        const emailSent = user?.email
+          ? await this.mailService.sendCustomerNotificationEmail(
+              user.email,
+              `JustMobile Number Transfer Cancelled (${res.orderId})`,
+              `Your pending mobile number transfer for ${res.msn} (Order #${res.orderId}) has been cancelled as requested.`,
+            )
+          : false;
+
+        return JSON.stringify({
+          cancelled: true,
+          orderId: res.orderId,
+          msn: res.msn,
+          writtenConfirmationSent: emailSent,
+          message: res.message,
+        });
+      }
+
       if (name === 'send_invoice_copy') {
         const custNo = String(args.custNo || '').trim();
         if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
@@ -857,7 +923,7 @@ export class ChatService {
           ? await this.mailService.sendCustomerNotificationEmail(
               user.email,
               `JustMobile Tax Invoice ${target.invoiceId}`,
-              `Here is a summary of your ATO Tax Invoice ${target.invoiceId} (${target.periodStart} to ${target.periodEnd}):\nPlan: ${target.planName}\nTotal (incl. GST): $${Number(target.amount).toFixed(2)}\nStatus: ${target.status}\n\nYou can download the full PDF anytime in /account -> Billing & Pay Now.`,
+              `Here is a summary of your ATO Tax Invoice ${target.invoiceId} (${target.periodStart} to ${target.periodEnd}):\nPlan: ${target.planName}\nTotal (incl. GST): $${Number(target.amount).toFixed(2)}\nStatus: ${target.status}\n\nYou can download the full PDF anytime in /account -> Billing & Payment Method.`,
             )
           : false;
 

@@ -51,7 +51,7 @@ export interface OrderRecord {
   planNo: string;
   planName: string;
   pricePerMonth: number;
-  status: 'PENDING' | 'ACTIVE' | 'PORT_IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'REJECTED';
+  status: 'PENDING' | 'ACTIVE' | 'PORT_IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'REJECTED' | 'CANCELLED';
   orderType: 'NEW_ACTIVATION' | 'PORT_IN' | 'PLAN_CHANGE' | 'ESIM_REPLACEMENT';
   orderAction: 'ADD_WME_NEW' | 'ADD_WME_PORT' | 'CHANGE_WME_PLAN' | 'CHANGE_WME_SIM';
   isEsim: boolean;
@@ -215,6 +215,9 @@ export class CarrierService {
     if (/addcustomer/i.test(operation)) {
       return 'We could not set up your account with our network provider right now, so nothing was saved. Please check your details and try again.';
     }
+    if (/payment-method|payment/i.test(operation)) {
+      return 'We could not register your payment method with our billing provider right now. Please check your card details and try again.';
+    }
     return 'We could not complete this request with our network provider right now, and no changes were saved. Please try again shortly or contact 1300 492 002.';
   }
 
@@ -336,10 +339,12 @@ export class CarrierService {
       }
 
       const data: any = JSON.parse(rawText);
-      const check = this.hasOctaneFailure(data);
-      if (check.failed) {
-        this.logger.error(`Carrier REST rejected request: ${check.detail}`);
-        throw new BadRequestException(this.formatFriendlyCarrierError(path, check.detail));
+      if (data && typeof data === 'object' && !Array.isArray(data)) {
+        const check = this.hasOctaneFailure(data);
+        if (check.failed) {
+          this.logger.error(`Carrier REST rejected request: ${check.detail}`);
+          throw new BadRequestException(this.formatFriendlyCarrierError(path, check.detail));
+        }
       }
 
       return data as T;
@@ -1191,6 +1196,18 @@ export class CarrierService {
     const pricePerMonth = dto.pricePerMonth || 37.55;
     const isLive = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test((dto.custNo || '').trim());
 
+    const ordersCol = this.db.getCollection<OrderRecord>('orders');
+    const existingPendingPort = await ordersCol.findOne({
+      msn,
+      orderType: 'PORT_IN',
+      status: { $in: ['PENDING', 'PORT_IN_PROGRESS'] },
+    });
+    if (existingPendingPort) {
+      throw new BadRequestException(
+        `A mobile number transfer for ${msn} is already in progress (Order #${existingPendingPort.orderId}). Please wait for the transfer to complete or cancel it before submitting a new request.`,
+      );
+    }
+
     let orderId = `PORT-${Math.floor(100000 + Math.random() * 900000)}`;
 
     if (isLive) {
@@ -1240,7 +1257,6 @@ export class CarrierService {
     const esimDetails = await this.resolveActivatedOrderEsim(isLive, dto.custNo, msn, orderId);
     const now = new Date();
 
-    const ordersCol = this.db.getCollection<OrderRecord>('orders');
     await ordersCol.updateOne(
       { orderId },
       {
@@ -2273,6 +2289,65 @@ export class CarrierService {
   }
 
   /**
+   * Cancel a pending/in-progress mobile number transfer order (NNA-084)
+   */
+  async cancelPortOrder(
+    custNo: string,
+    orderId: string,
+    reason?: string,
+  ): Promise<{
+    success: boolean;
+    orderId: string;
+    msn: string;
+    status: string;
+    cancelledWithOctane: boolean;
+    message: string;
+  }> {
+    const cleanCustNo = String(custNo || '').trim();
+    const cleanOrderId = String(orderId || '').trim();
+    if (!cleanCustNo || !cleanOrderId) {
+      throw new BadRequestException('Customer number and order ID are required.');
+    }
+
+    const ordersCol = this.db.getCollection<OrderRecord>('orders');
+    const order = await ordersCol.findOne({ orderId: cleanOrderId, custNo: cleanCustNo });
+    if (!order) {
+      throw new NotFoundException(`Order #${cleanOrderId} not found.`);
+    }
+
+    if (order.status === 'ACTIVE' || order.status === 'COMPLETED' || order.status === 'CANCELLED') {
+      throw new BadRequestException(
+        `Order #${cleanOrderId} cannot be cancelled because its status is ${order.status}.`,
+      );
+    }
+
+    const detail = reason?.trim() || 'Customer requested mobile number transfer cancellation';
+    const octaneRes = await this.cancelOrder(cleanCustNo, cleanOrderId, detail);
+
+    const now = new Date();
+    await ordersCol.updateOne(
+      { orderId: cleanOrderId, custNo: cleanCustNo },
+      {
+        $set: {
+          status: 'CANCELLED',
+          cancellationReason: reason?.trim() || 'Cancelled by customer',
+          cancelledAt: now,
+          updatedAt: now,
+        } as any,
+      },
+    );
+
+    return {
+      success: true,
+      orderId: cleanOrderId,
+      msn: order.msn,
+      status: 'CANCELLED',
+      cancelledWithOctane: octaneRes.cancelledWithOctane,
+      message: `Mobile number transfer for ${order.msn} (Order #${cleanOrderId}) has been cancelled.`,
+    };
+  }
+
+  /**
    * Get Real-time Monthly Usage & Billing Cycle Meter
    */
   async getUnbilledUsage(custNo: string) {
@@ -2433,6 +2508,105 @@ export class CarrierService {
     };
   }
 
+  // ==========================================================================
+  // 7. PAYMENT METHODS (QUICKSTREAM -> OCTANE DIRECT DEBIT)
+  // ==========================================================================
+
+  /**
+   * Build MongoDB filter matching custNo regardless of string/number storage
+   */
+  private buildCustNoFilter(custNo: string): Record<string, any> {
+    const clean = (custNo || '').trim();
+    const digits = clean.replace(/\D+/g, '');
+    const numericVal = digits ? parseInt(digits, 10) : NaN;
+    const orClauses: any[] = [{ custNo: clean }];
+    if (!isNaN(numericVal)) {
+      orClauses.push({ custNo: numericVal });
+    }
+    return { $or: orClauses };
+  }
+
+  /**
+   * Register a Westpac QuickStream single-use card token on the customer's Octane account.
+   * Octane handles all recurring billing and direct debit charges natively.
+   */
+  async addPaymentMethod(custNo: string, paymentTokenId: string) {
+    const cleanCustNo = String(custNo || '').trim();
+    const cleanToken = String(paymentTokenId || '').trim();
+
+    if (!cleanCustNo || !cleanToken) {
+      throw new BadRequestException('Customer number and payment token are required.');
+    }
+
+    const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
+    const groupNo = this.groupNo || process.env.groupNo || '922';
+    let result: any = null;
+
+    if (isLiveNumeric) {
+      const endpoint = `/api/v1/group/${groupNo}/customer/${cleanCustNo}/payment-method`;
+      const payload = {
+        paymentProvider: 'QS',
+        paymentTokenId: cleanToken,
+      };
+      this.logger.log(`Registering QuickStream payment method with Octane for custNo=${cleanCustNo}`);
+      result = await this.restCall(endpoint, payload, 'POST');
+    } else {
+      result = {
+        paymentProvider: 'QS',
+        paymentTokenId: cleanToken,
+        simulated: true,
+      };
+    }
+
+    const usersCol = this.db.getCollection('users');
+    await usersCol.updateOne(this.buildCustNoFilter(cleanCustNo), {
+      $set: {
+        hasPaymentMethod: true,
+        paymentProvider: 'QS',
+        paymentMethodLabel: 'Direct Debit (QuickStream Card)',
+        paymentUpdatedAt: new Date(),
+      },
+    });
+
+    return {
+      success: true,
+      custNo: cleanCustNo,
+      paymentProvider: 'QS',
+      data: result,
+      message: 'Payment method added successfully.',
+    };
+  }
+
+  /**
+   * Retrieve registered payment methods for a customer from Octane (or local state in sandbox mode).
+   */
+  async getPaymentMethods(custNo: string) {
+    const cleanCustNo = String(custNo || '').trim();
+    if (!cleanCustNo) {
+      throw new BadRequestException('Customer number is required.');
+    }
+
+    const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
+    const groupNo = this.groupNo || process.env.groupNo || '922';
+
+    if (isLiveNumeric) {
+      const endpoint = `/api/v1/group/${groupNo}/customer/${cleanCustNo}/payment-method`;
+      const result = await this.restCall<any>(endpoint, undefined, 'GET');
+      return {
+        success: true,
+        custNo: cleanCustNo,
+        data: result ?? [],
+      };
+    }
+
+    const userDoc = await this.findUserDoc(cleanCustNo);
+    return {
+      success: true,
+      custNo: cleanCustNo,
+      data: userDoc?.hasPaymentMethod ? [{ paymentProvider: 'QS', status: 'ACTIVE' }] : [],
+    };
+  }
+
   /**
    * Retrieve Current Balance and Invoicing Info
    */
@@ -2441,10 +2615,11 @@ export class CarrierService {
     const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
 
     if (isLiveNumeric) {
-      const [balRes, svcRes, custRes] = await Promise.allSettled([
+      const [balRes, svcRes, custRes, userRes] = await Promise.allSettled([
         this.soapCall('/UtbCustomer', 'getCurrBalance', { customer: { custNo: cleanCustNo } }),
         this.getServices(cleanCustNo),
         this.getCustomer(cleanCustNo),
+        this.findUserDoc(cleanCustNo),
       ]);
 
       let liveCurrBalance = 0.0;
@@ -2455,7 +2630,21 @@ export class CarrierService {
 
       const services = svcRes.status === 'fulfilled' ? svcRes.value.services || [] : [];
       const customerInfo: any = custRes.status === 'fulfilled' ? custRes.value : null;
+      const userDoc: any = userRes.status === 'fulfilled' ? userRes.value : null;
       const hasActivePlan = services.length > 0 && customerInfo?.status !== 'Disconnected';
+      const hasSavedPayment = Boolean(
+        userDoc?.hasPaymentMethod ||
+          customerInfo?.paymentMethod === 'CC' ||
+          customerInfo?.raw?.direct_debit_method === 'CC' ||
+          customerInfo?.raw?.payment_method === 'DD' ||
+          customerInfo?.raw?.direct_debit_method,
+      );
+      const ddLabel =
+        userDoc?.hasPaymentMethod
+          ? userDoc.paymentMethodLabel || 'Direct Debit (QuickStream Card)'
+          : customerInfo?.paymentMethod === 'CC' || customerInfo?.raw?.direct_debit_method === 'CC'
+            ? 'Direct Debit (Credit/Debit Card)'
+            : customerInfo?.paymentMethod || (hasActivePlan ? 'Direct Debit' : 'No payment method registered');
 
       if (!hasActivePlan) {
         return {
@@ -2468,8 +2657,8 @@ export class CarrierService {
           lastInvoiceDate: null,
           nextInvoiceDate: null,
           nextInvoiceAmount: 0.0,
-          autoPayStatus: 'Inactive',
-          paymentMethod: customerInfo?.paymentMethod || 'No payment method registered',
+          autoPayStatus: hasSavedPayment ? 'Active (Card Saved)' : 'Inactive',
+          paymentMethod: ddLabel,
         };
       }
 
@@ -2477,10 +2666,6 @@ export class CarrierService {
       const resolved = this.resolvePlanDetails(primarySvc.planName, primarySvc.planNo);
       const monthlyFee = resolved?.price ?? primarySvc.planPrice ?? 0;
       const cycle = this.getCurrentBillingCycleDates();
-      const ddLabel =
-        customerInfo?.paymentMethod === 'CC' || customerInfo?.raw?.direct_debit_method === 'CC'
-          ? 'Direct Debit (Credit/Debit Card)'
-          : customerInfo?.paymentMethod || 'Direct Debit';
 
       return {
         custNo: cleanCustNo,
@@ -2493,13 +2678,14 @@ export class CarrierService {
         lastInvoiceDate: cycle.lastInvoiceDate,
         nextInvoiceDate: cycle.nextInvoiceDate,
         nextInvoiceAmount: monthlyFee,
-        autoPayStatus: customerInfo?.raw?.payment_method === 'DD' || customerInfo?.raw?.direct_debit_method ? 'Active' : 'Standard',
+        autoPayStatus: hasSavedPayment ? 'Active' : 'Standard',
         paymentMethod: ddLabel,
       };
     }
 
     const isTestCustomer = cleanCustNo === 'CUST990001';
     if (!isTestCustomer) {
+      const userDoc = await this.findUserDoc(cleanCustNo);
       return {
         custNo: cleanCustNo,
         hasActivePlan: false,
@@ -2509,8 +2695,10 @@ export class CarrierService {
         lastInvoiceDate: null,
         nextInvoiceDate: null,
         nextInvoiceAmount: 0.0,
-        autoPayStatus: 'Inactive',
-        paymentMethod: 'No payment method registered',
+        autoPayStatus: userDoc?.hasPaymentMethod ? 'Active (Card Saved)' : 'Inactive',
+        paymentMethod: userDoc?.hasPaymentMethod
+          ? userDoc.paymentMethodLabel || 'Direct Debit (QuickStream Card)'
+          : 'No payment method registered',
       };
     }
 

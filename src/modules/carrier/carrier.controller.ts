@@ -1,4 +1,18 @@
-import { Controller, Post, Get, Param, Body, Query, Res, Headers, Inject, forwardRef, HttpCode, HttpStatus } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Get,
+  Param,
+  Body,
+  Query,
+  Res,
+  Headers,
+  Inject,
+  forwardRef,
+  HttpCode,
+  HttpStatus,
+  BadRequestException,
+} from '@nestjs/common';
 import type { Response } from 'express';
 import { CarrierService } from './carrier.service';
 import { InvoiceService } from './invoice.service';
@@ -93,20 +107,53 @@ export class CarrierController {
     res.end(pdfBuffer);
   }
 
+  @Post('customers/:custNo/payment-methods')
+  @HttpCode(HttpStatus.CREATED)
+  async addCustomerPaymentMethod(
+    @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body: { paymentTokenId: string },
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
+    return this.carrierService.addPaymentMethod(custNo, body?.paymentTokenId);
+  }
+
+  @Get('customers/:custNo/payment-methods')
+  async getCustomerPaymentMethods(
+    @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader: string | undefined,
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
+    return this.carrierService.getPaymentMethods(custNo);
+  }
+
+  @Post('payments/methods')
+  @HttpCode(HttpStatus.CREATED)
+  async addPaymentMethod(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body: { custNo: string; paymentTokenId: string },
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader, body?.custNo);
+    return this.carrierService.addPaymentMethod(body?.custNo, body?.paymentTokenId);
+  }
+
   @Post('customers/:custNo/pay-now')
   @HttpCode(HttpStatus.OK)
   async payNow(
     @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader: string | undefined,
     @Body()
     body: {
-      amount: number;
-      invoiceId?: string;
-      cardName?: string;
-      cardLast4?: string;
-      paymentMethod?: string;
+      paymentTokenId?: string;
     },
   ) {
-    return this.invoiceService.payNow(custNo, body);
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
+    if (!body?.paymentTokenId) {
+      throw new BadRequestException(
+        'Please register your payment card through Westpac QuickStream. Direct debit billing is handled automatically by Octane.',
+      );
+    }
+    return this.carrierService.addPaymentMethod(custNo, body.paymentTokenId);
   }
 
   @Post('customers/:custNo/bill-query')
@@ -179,6 +226,18 @@ export class CarrierController {
     @Body() body: { numType?: 'prepaid' | 'postpaid'; dob?: string; arn?: string; donorCarrier?: string },
   ) {
     return this.carrierService.resubmitPortOrder(orderId, body);
+  }
+
+  @Post('customers/:custNo/orders/:orderId/cancel-port')
+  @HttpCode(HttpStatus.OK)
+  async cancelPortOrder(
+    @Param('custNo') custNo: string,
+    @Param('orderId') orderId: string,
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body?: { reason?: string },
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader, custNo);
+    return this.carrierService.cancelPortOrder(custNo, orderId, body?.reason);
   }
 
   @Post('orders/:orderId/simulate-rejection')

@@ -1159,9 +1159,8 @@ export class AuthService implements OnModuleInit {
     }
   }
 
-  async verifyActionTwoFactorForHeader(
+  async verifyCustomerAccess(
     authHeader: string | undefined,
-    codeRaw: string,
     expectedCustNo?: string,
   ) {
     const user = await this.getAuthenticatedUser(authHeader);
@@ -1172,6 +1171,15 @@ export class AuthService implements OnModuleInit {
     ) {
       throw new ForbiddenException('You are not authorised to perform actions on another customer account.');
     }
+    return user;
+  }
+
+  async verifyActionTwoFactorForHeader(
+    authHeader: string | undefined,
+    codeRaw: string,
+    expectedCustNo?: string,
+  ) {
+    const user = await this.verifyCustomerAccess(authHeader, expectedCustNo);
     await this.verifyActionTwoFactor(user, codeRaw);
     return user;
   }

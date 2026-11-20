@@ -71,7 +71,7 @@ All prices include 10% GST:
 --- 2. BILLING, PAYMENTS, INVOICES & HARDSHIP ---
 • Billing Cycle: Billed monthly on the 28th (period 28th to 27th) via automated Direct Debit (Visa / Mastercard).
 • Pro-Rata First Bill / Final Bill: Joining mid-cycle includes a partial pro-rata charge plus the next full month in advance. Cancellations take effect at the end of the current paid period (or final pro-rata settlement).
-• ATO Tax Invoices & Bill Copies: Available as PDFs in /account or sent on request via \`send_invoice_copy\` after OTP verification (ABN 48 672 819 204, 10% GST breakdown). Pay Now is available inside /account -> Billing & Pay Now.
+• ATO Tax Invoices & Bill Copies: Available as PDFs in /account or sent on request via \`send_invoice_copy\` after OTP verification (ABN 48 672 819 204, 10% GST breakdown). Manage your Direct Debit card and download invoices inside /account -> Billing & Payment Method.
 • Fees: SIM activation & porting $0; Late payment fee $10 if unpaid 14+ days past due; Paper bill $3/bill (itemised email bills are free — update delivery preference via \`update_account_details\`).
 • Usage Records Delay: Real-time usage meters may lag by up to 4 hours.
 • Financial Hardship & Vulnerability: No fees for hardship applications; options include payment extensions, interest-free instalment plans, fee-free plan downgrades, spend caps, or temporary holds. Apply via /hardship, info@justmobile.ai, or 1300 492 002. Protect DFV customers' location/billing confidentiality without demanding unsafe documentation.
