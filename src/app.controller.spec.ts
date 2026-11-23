@@ -6,6 +6,7 @@ import { CarrierService } from './modules/carrier/carrier.service';
 import { CarrierController } from './modules/carrier/carrier.controller';
 import { CarrierPortingWorker } from './modules/carrier/carrier-porting.worker';
 import { ChatService } from './modules/chat/chat.service';
+import { AuthService } from './modules/auth/auth.service';
 
 describe('AppController', () => {
   let appController: AppController;
@@ -1194,6 +1195,24 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
         { verifyCustomerAccess } as any,
       );
       await expect(controller.deleteCustomer('551233', undefined)).rejects.toThrow(ForbiddenException);
+
+      const adminDeleteCustomer = jest.fn().mockResolvedValue({ success: true, custNo: '551196' });
+      const invalidateAdminStatsCache = jest.fn();
+      const adminController = new CarrierController(
+        { deleteCustomer: adminDeleteCustomer, getServices: jest.fn() } as any,
+        {} as any,
+        {} as any,
+        {
+          verifyCustomerAccess: jest.fn().mockResolvedValue({ role: 'admin' }),
+          invalidateAdminStatsCache,
+        } as any,
+      );
+      await expect(adminController.deleteCustomer('551196', 'Bearer admin-jwt')).resolves.toEqual({
+        success: true,
+        custNo: '551196',
+      });
+      expect(adminDeleteCustomer).toHaveBeenCalledWith('551196');
+      expect(invalidateAdminStatsCache).toHaveBeenCalledTimes(1);
     } finally {
       if (prevLive === undefined) {
         delete process.env.TELCO_LIVE_CREATE;
@@ -1201,5 +1220,48 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
         process.env.TELCO_LIVE_CREATE = prevLive;
       }
     }
+  });
+
+  it('AuthService.getAdminStats supports forceRefresh and invalidateAdminStatsCache', async () => {
+    const countDocuments = jest.fn().mockResolvedValue(1);
+    const toArray = jest.fn().mockResolvedValue([]);
+    const usersCol = {
+      countDocuments,
+      find: jest.fn(() => ({
+        project: jest.fn(() => ({
+          sort: jest.fn(() => ({
+            limit: jest.fn(() => ({ toArray })),
+          })),
+        })),
+      })),
+    };
+    const ordersCol = {
+      find: jest.fn(() => ({
+        sort: jest.fn(() => ({ toArray: jest.fn().mockResolvedValue([]) })),
+      })),
+    };
+    const mockDb: any = {
+      getCollection: jest.fn((name: string) => (name === 'users' ? usersCol : ordersCol)),
+    };
+    const clearOctaneCustomersCache = jest.fn();
+    const getAllCustomersFromOctane = jest.fn().mockResolvedValue(new Map());
+    const authService = new AuthService(
+      mockDb,
+      {} as any,
+      { clearOctaneCustomersCache, getAllCustomersFromOctane } as any,
+    );
+    jest.spyOn(authService, 'getMe').mockResolvedValue({ user: { role: 'admin' } } as any);
+
+    await authService.getAdminStats('Bearer admin-jwt');
+    await authService.getAdminStats('Bearer admin-jwt');
+    expect(getAllCustomersFromOctane).toHaveBeenCalledTimes(1);
+
+    await authService.getAdminStats('Bearer admin-jwt', true);
+    expect(clearOctaneCustomersCache).toHaveBeenCalledTimes(1);
+    expect(getAllCustomersFromOctane).toHaveBeenCalledTimes(2);
+
+    authService.invalidateAdminStatsCache();
+    await authService.getAdminStats('Bearer admin-jwt');
+    expect(getAllCustomersFromOctane).toHaveBeenCalledTimes(3);
   });
 });

@@ -90,7 +90,9 @@ export class CarrierController {
         );
       }
     }
-    return this.carrierService.deleteCustomer(custNo);
+    const result = await this.carrierService.deleteCustomer(custNo);
+    this.authService.invalidateAdminStatsCache?.();
+    return result;
   }
 
   @Get('customers/:custNo/services')

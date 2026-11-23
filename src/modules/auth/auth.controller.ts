@@ -3,6 +3,7 @@ import {
   Post,
   Get,
   Body,
+  Query,
   Headers,
   HttpCode,
   HttpStatus,
@@ -165,8 +166,12 @@ export class AuthController {
   }
 
   @Get('admin/stats')
-  async getAdminStats(@Headers('authorization') authHeader?: string) {
-    return this.authService.getAdminStats(authHeader);
+  async getAdminStats(
+    @Headers('authorization') authHeader?: string,
+    @Query('refresh') refresh?: string,
+  ) {
+    const forceRefresh = refresh === 'true' || refresh === '1';
+    return this.authService.getAdminStats(authHeader, forceRefresh);
   }
 
   @Get('admin/support-cases')

@@ -943,6 +943,10 @@ export class AuthService implements OnModuleInit {
 
   private cachedAdminStats: { expiresAt: number; payload: any } | null = null;
 
+  invalidateAdminStatsCache() {
+    this.cachedAdminStats = null;
+  }
+
   async getMe(authHeader?: string) {
     const user = await this.getAuthenticatedUser(authHeader);
     const formatted: Record<string, any> = this.formatUserResponse(user);
@@ -1301,15 +1305,19 @@ export class AuthService implements OnModuleInit {
     };
   }
 
-  async getAdminStats(authHeader?: string) {
+  async getAdminStats(authHeader?: string, forceRefresh = false) {
     const me = await this.getMe(authHeader);
     if (me.user.role !== 'admin') {
       throw new UnauthorizedException('Admin access required.');
     }
 
     const cached = this.cachedAdminStats;
-    if (cached && Date.now() < cached.expiresAt) {
+    if (!forceRefresh && cached && Date.now() < cached.expiresAt) {
       return cached.payload;
+    }
+
+    if (forceRefresh) {
+      this.carrierService.clearOctaneCustomersCache?.();
     }
 
     const usersCol = this.db.getCollection<UserDocument>('users');

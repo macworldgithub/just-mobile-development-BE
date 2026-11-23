@@ -1,4 +1,5 @@
 import { Injectable, Logger, BadRequestException, HttpException, HttpStatus, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { ObjectId } from 'mongodb';
 import { DatabaseService } from '../../database/database.service';
 import { MailService } from '../mail/mail.service';
 import * as soap from 'soap';
@@ -551,10 +552,19 @@ export class CarrierService {
     }
 
     const usersCol = this.db.getCollection('users');
-    const deleteRes = await usersCol.deleteOne(this.buildCustNoFilter(cleanCustNo));
+    const custFilter = this.buildCustNoFilter(cleanCustNo);
+    const idOrCustFilter =
+      /^[0-9a-fA-F]{24}$/.test(cleanCustNo) && ObjectId.isValid(cleanCustNo)
+        ? { $or: [...(custFilter.$or || [custFilter]), { _id: new ObjectId(cleanCustNo) }] }
+        : custFilter;
+    const deleteFilter = { $and: [idOrCustFilter, { role: { $ne: 'admin' } }] };
+    const deleteRes =
+      typeof (usersCol as any).deleteMany === 'function'
+        ? await usersCol.deleteMany(deleteFilter)
+        : await usersCol.deleteOne(deleteFilter);
     await this.db
       .getCollection('chat_sessions')
-      .updateMany(this.buildCustNoFilter(cleanCustNo), { $set: { active: false, loggedOutAt: new Date() } })
+      .updateMany(custFilter, { $set: { active: false, loggedOutAt: new Date() } })
       .catch(() => {});
 
     return {
@@ -662,6 +672,10 @@ export class CarrierService {
       data: list,
     };
     return list;
+  }
+
+  clearOctaneCustomersCache() {
+    this.cachedOctaneCustomers = null;
   }
 
   /**
