@@ -504,6 +504,70 @@ export class CarrierService {
     }
   }
 
+  /**
+   * Soft-delete / disconnect a customer in Octane (category_status_customer: 'Disconnected')
+   * and remove the local user record from MongoDB.
+   */
+  async deleteCustomer(custNo: string): Promise<{
+    success: boolean;
+    custNo: string;
+    disconnectedInCarrier: boolean;
+    deletedLocally: boolean;
+    message: string;
+  }> {
+    const cleanCustNo = String(custNo || '').trim();
+    if (!cleanCustNo) {
+      throw new BadRequestException('Customer number is required.');
+    }
+
+    const isLiveNumeric = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
+    let disconnectedInCarrier = false;
+
+    if (isLiveNumeric) {
+      const [liveCustRes, userDoc] = await Promise.allSettled([
+        this.getCustomer(cleanCustNo),
+        this.findUserDoc(cleanCustNo),
+      ]);
+      const liveCust: any = liveCustRes.status === 'fulfilled' ? liveCustRes.value : null;
+      const localUser: any = userDoc.status === 'fulfilled' ? userDoc.value : null;
+      const effectiveDob = this.normalizeDobIso(liveCust?.dob || localUser?.dob || '') || '1995-01-01';
+
+      try {
+        const res: any = await this.soapCall('/UtbCustomer', 'updateCustomer', {
+          customer: {
+            custNo: cleanCustNo,
+            dob: effectiveDob,
+            category_status_customer: 'Disconnected',
+          },
+        });
+        this.assertOctaneSoapSuccess('updateCustomer (disconnect)', res);
+        this.cachedOctaneCustomers = null;
+        disconnectedInCarrier = true;
+      } catch (err: any) {
+        this.logger.error(`Live deleteCustomer (disconnect) failed for ${cleanCustNo}: ${err.message}`);
+        if (err instanceof HttpException) throw err;
+        throw new BadRequestException(this.formatFriendlyCarrierError('updateCustomer', err.message));
+      }
+    }
+
+    const usersCol = this.db.getCollection('users');
+    const deleteRes = await usersCol.deleteOne(this.buildCustNoFilter(cleanCustNo));
+    await this.db
+      .getCollection('chat_sessions')
+      .updateMany(this.buildCustNoFilter(cleanCustNo), { $set: { active: false, loggedOutAt: new Date() } })
+      .catch(() => {});
+
+    return {
+      success: true,
+      custNo: cleanCustNo,
+      disconnectedInCarrier,
+      deletedLocally: Boolean(deleteRes?.deletedCount && deleteRes.deletedCount > 0),
+      message: disconnectedInCarrier
+        ? `Customer #${cleanCustNo} has been marked Disconnected in the carrier system and removed locally.`
+        : `Customer #${cleanCustNo} has been removed from local records.`,
+    };
+  }
+
   private async findUserDoc(custNo: string): Promise<any> {
     const usersCol = this.db.getCollection('users');
     const clean = (custNo || '').trim();

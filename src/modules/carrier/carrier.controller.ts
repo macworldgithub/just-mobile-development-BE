@@ -2,6 +2,7 @@ import {
   Controller,
   Post,
   Get,
+  Delete,
   Param,
   Body,
   Query,
@@ -69,6 +70,27 @@ export class CarrierController {
   ) {
     await this.authService.verifyCustomerAccess(authHeader, custNo);
     return this.carrierService.getCustomer(custNo);
+  }
+
+  @Delete('customers/:custNo')
+  @HttpCode(HttpStatus.OK)
+  async deleteCustomer(
+    @Param('custNo') custNo: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    const caller = await this.authService.verifyCustomerAccess(authHeader, custNo);
+    if (caller?.role !== 'admin') {
+      const svcRes = await this.carrierService.getServices(custNo).catch(() => ({ services: [] }));
+      const hasActiveService = Array.isArray(svcRes?.services)
+        ? svcRes.services.some((s: any) => !/^(dis|cancel)/i.test(String(s?.status || '')))
+        : false;
+      if (hasActiveService) {
+        throw new BadRequestException(
+          'Please contact 1300 492 002 or info@justmobile.ai to disconnect your active mobile service before deleting your account.',
+        );
+      }
+    }
+    return this.carrierService.deleteCustomer(custNo);
   }
 
   @Get('customers/:custNo/services')
@@ -198,7 +220,7 @@ export class CarrierController {
     await this.authService.verifyCustomerAccess(authHeader, custNo);
     if (!body?.paymentTokenId) {
       throw new BadRequestException(
-        'Please register your payment card through Westpac QuickStream. Direct debit billing is handled automatically by Octane.',
+        "Please register your payment card through Westpac QuickStream's encrypted frame. Direct debit billing runs automatically on the 28th of each month.",
       );
     }
     return this.carrierService.addPaymentMethod(custNo, body.paymentTokenId);

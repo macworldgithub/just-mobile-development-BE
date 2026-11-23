@@ -1149,4 +1149,57 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
       }
     }
   });
+
+  it('CarrierService.deleteCustomer disconnects live customer in Octane and removes local user; CarrierController.deleteCustomer enforces verifyCustomerAccess', async () => {
+    const prevLive = process.env.TELCO_LIVE_CREATE;
+    process.env.TELCO_LIVE_CREATE = 'true';
+
+    try {
+      const deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 });
+      const updateMany = jest.fn().mockResolvedValue({ modifiedCount: 1 });
+      const findOne = jest.fn().mockResolvedValue({ custNo: '551233', dob: '1995-05-10' });
+      const mockDb: any = {
+        getCollection: jest.fn(() => ({ deleteOne, updateMany, findOne })),
+      };
+      const service = new CarrierService(mockDb, {} as any);
+      jest.spyOn(service, 'getCustomer').mockResolvedValue({ custNo: '551233', dob: '1995-05-10' } as any);
+      const soapSpy = jest.spyOn(service, 'soapCall').mockResolvedValue({ return: { errorCode: '0' } });
+
+      const result = await service.deleteCustomer('551233');
+      expect(soapSpy).toHaveBeenCalledWith(
+        '/UtbCustomer',
+        'updateCustomer',
+        expect.objectContaining({
+          customer: expect.objectContaining({
+            custNo: '551233',
+            category_status_customer: 'Disconnected',
+          }),
+        }),
+      );
+      expect(deleteOne).toHaveBeenCalled();
+      expect(result).toEqual(
+        expect.objectContaining({
+          success: true,
+          custNo: '551233',
+          disconnectedInCarrier: true,
+          deletedLocally: true,
+        }),
+      );
+
+      const verifyCustomerAccess = jest.fn().mockRejectedValue(new ForbiddenException('Auth required'));
+      const controller = new CarrierController(
+        { deleteCustomer: jest.fn(), getServices: jest.fn() } as any,
+        {} as any,
+        {} as any,
+        { verifyCustomerAccess } as any,
+      );
+      await expect(controller.deleteCustomer('551233', undefined)).rejects.toThrow(ForbiddenException);
+    } finally {
+      if (prevLive === undefined) {
+        delete process.env.TELCO_LIVE_CREATE;
+      } else {
+        process.env.TELCO_LIVE_CREATE = prevLive;
+      }
+    }
+  });
 });
