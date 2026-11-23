@@ -1,4 +1,4 @@
-import { Controller, Post, Body, BadRequestException } from '@nestjs/common';
+import { Controller, Post, Body, Headers, BadRequestException } from '@nestjs/common';
 import { ChatService } from './chat.service';
 
 @Controller('api/chat')
@@ -12,11 +12,12 @@ export class ChatController {
       messages: Array<{ role: string; content: string }>;
       sessionId?: string;
     },
+    @Headers('authorization') authHeader?: string,
   ) {
     if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
       throw new BadRequestException('Messages array is required.');
     }
 
-    return await this.chatService.generateResponse(body.messages, body.sessionId);
+    return await this.chatService.generateResponse(body.messages, body.sessionId, authHeader);
   }
 }

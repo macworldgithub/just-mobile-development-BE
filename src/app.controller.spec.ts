@@ -1082,4 +1082,71 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
     expect(service.resolvePlanDetails('JM 10GB Auto')).toBeNull();
     expect(service.resolvePlanDetails('JM 29GB Auto')).toBeNull();
   });
+
+  it('ChatService.generateResponse auto-opens QuickStream iframe for logged-in customers asking to save payment method and gates unverified guests', async () => {
+    const prevKey = process.env.OPENAI_KEY;
+    process.env.OPENAI_KEY = 'test-openai-key';
+    const originalFetch = global.fetch;
+
+    try {
+      const mockDb: any = {
+        getCollection: jest.fn(() => ({
+          findOne: jest.fn().mockResolvedValue(null),
+          updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
+        })),
+      };
+      const verifyCustomerAccess = jest.fn().mockResolvedValue({ custNo: '551059', role: 'customer' });
+      const issueTokenForCustomer = jest.fn().mockResolvedValue('jwt-551059');
+      const chatService = new ChatService(
+        mockDb,
+        {} as any,
+        {} as any,
+        {} as any,
+        { verifyCustomerAccess, issueTokenForCustomer } as any,
+      );
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content: 'Please provide your card number, expiry date, and CVV.',
+              },
+            },
+          ],
+        }),
+      }) as any;
+
+      const loggedInRes: any = await chatService.generateResponse(
+        [{ role: 'user', content: 'well i like to save my payment method' }],
+        'sess-jwt-1',
+        'Bearer valid-jwt',
+      );
+      expect(verifyCustomerAccess).toHaveBeenCalledWith('Bearer valid-jwt');
+      expect(loggedInRes.uiAction).toEqual(
+        expect.objectContaining({
+          type: 'QUICKSTREAM_PAYMENT',
+          custNo: '551059',
+          purpose: 'update_card',
+          authToken: 'jwt-551059',
+        }),
+      );
+      expect(loggedInRes.reply).not.toMatch(/provide your card number/i);
+
+      const guestRes: any = await chatService.generateResponse(
+        [{ role: 'user', content: 'well i like to save my payment method' }],
+        'sess-guest-1',
+      );
+      expect(guestRes.uiAction).toBeUndefined();
+    } finally {
+      global.fetch = originalFetch;
+      if (prevKey === undefined) {
+        delete process.env.OPENAI_KEY;
+      } else {
+        process.env.OPENAI_KEY = prevKey;
+      }
+    }
+  });
 });

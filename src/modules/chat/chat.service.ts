@@ -93,9 +93,22 @@ export class ChatService {
 
   private detectSensitiveInput(text: string): boolean {
     if (!text) return false;
-    const cardPattern = /\b(?:\d[ -]*?){13,16}\b/;
+    const cardPattern = /\b(?:\d[ -]*?){13,26}\b/;
     const sensitivePhrase = /\b(cvv|cvc|card number|medicare|passport number|driver.?s? licen[cs]e|my pin is)\b/i;
     return cardPattern.test(text) || sensitivePhrase.test(text);
+  }
+
+  private detectPaymentCardSetupIntent(text: string): boolean {
+    if (!text) return false;
+    const hasPlanOrOrderTerms =
+      /\b(15|45|65|100|120|150|180)\s*gb\b|\b(plan|plans|esim|sim|new number|port|transfer|switch|activate)\b/i.test(
+        text,
+      );
+    if (hasPlanOrOrderTerms) return false;
+    const cardActionPattern =
+      /\b(save|add|set ?up|setup|update|change|register|enter|link|put|store|open)\b.{0,35}\b(payment|card|credit card|debit card|direct debit|auto.?pay|billing method)\b/i;
+    const cardNounPattern = /\b(payment method|payment form|card form|direct debit card)\b/i;
+    return cardActionPattern.test(text) || cardNounPattern.test(text);
   }
 
   private async findCustomerByIdentifier(identifierRaw: string): Promise<any | null> {
@@ -1690,6 +1703,7 @@ export class ChatService {
   async generateResponse(
     messages: Array<{ role: string; content: string }>,
     sessionId?: string,
+    authHeader?: string,
   ) {
     const apiKey = process.env.OPENAI_KEY;
 
@@ -1703,16 +1717,71 @@ export class ChatService {
 
     const latestUserMsg = messages[messages.length - 1]?.content || '';
     const containsSensitive = this.detectSensitiveInput(latestUserMsg);
+    const hasCardDigits = /\b(?:\d[ -]*?){13,26}\b/.test(latestUserMsg);
+    const isCardSetupIntent = this.detectPaymentCardSetupIntent(latestUserMsg);
 
     const cleanSessionId = (sessionId || 'default-session').trim();
-    const activeSession = await this.db
-      .getCollection('chat_sessions')
+    const sessionsCol = this.db.getCollection('chat_sessions');
+    let activeSession: any = await sessionsCol
       .findOne({ sessionId: cleanSessionId, active: true, expiresAt: { $gt: new Date() } })
       .catch(() => null);
 
-    let systemContent = containsSensitive
-      ? `${BELE_SYSTEM_PROMPT}\n\n[SECURITY ALERT: The user's last message appears to contain sensitive card/PIN/ID details. Immediately warn them NOT to share card numbers, CVVs, PINs, or identity numbers in chat, do NOT repeat those numbers back, and direct them to [My Account](/account) or 1300 492 002.]`
-      : BELE_SYSTEM_PROMPT;
+    if (
+      !activeSession &&
+      authHeader &&
+      typeof this.authService?.verifyCustomerAccess === 'function'
+    ) {
+      const explicitlyLoggedOut = await sessionsCol
+        .findOne({ sessionId: cleanSessionId, active: false })
+        .catch(() => null);
+      if (!explicitlyLoggedOut) {
+        try {
+          const caller = await this.authService.verifyCustomerAccess(authHeader);
+          if (caller?.custNo && caller?.role === 'customer') {
+            const now = new Date();
+            const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+            const verifiedCustNo = String(caller.custNo).trim();
+            await sessionsCol
+              .updateOne(
+                { sessionId: cleanSessionId, custNo: verifiedCustNo },
+                {
+                  $set: {
+                    sessionId: cleanSessionId,
+                    custNo: verifiedCustNo,
+                    active: true,
+                    verifiedAt: now,
+                    expiresAt,
+                  },
+                },
+                { upsert: true },
+              )
+              .catch(() => {});
+            activeSession = {
+              sessionId: cleanSessionId,
+              custNo: verifiedCustNo,
+              active: true,
+              expiresAt,
+            };
+          }
+        } catch {
+          // Invalid or expired JWT — continue as unverified guest chat
+        }
+      }
+    }
+
+    let systemContent = BELE_SYSTEM_PROMPT;
+
+    if (containsSensitive) {
+      systemContent += activeSession?.custNo
+        ? `\n\n[SECURITY ALERT: The user's last message appears to contain sensitive card/PIN/ID details. Immediately warn them NOT to type card numbers, CVVs, PINs, or identity numbers as text in chat, do NOT repeat those digits back, and IMMEDIATELY call \`open_quickstream_card_form\` with \`custNo: "${activeSession.custNo}"\` and \`purpose: "update_card"\` so the encrypted Westpac QuickStream card iframe opens right inside chat (also mention [My Account](/account)).]`
+        : `\n\n[SECURITY ALERT: The user's last message appears to contain sensitive card/PIN/ID details. Immediately warn them NOT to share card numbers, CVVs, PINs, or identity numbers in chat text, do NOT repeat those numbers back, and explain they can enter their card safely inside our encrypted Westpac QuickStream card form right here in chat after quick 6-digit OTP verification (ask ONLY for their Customer Number or registered email) or inside [My Account](/account).]`;
+    }
+
+    if (isCardSetupIntent) {
+      systemContent += activeSession?.custNo
+        ? `\n\n[PAYMENT FORM RULE: The verified customer wants to save/update their payment method. IMMEDIATELY call \`open_quickstream_card_form\` with \`custNo: "${activeSession.custNo}"\` and \`purpose: "update_card"\` in this turn so the encrypted Westpac QuickStream card iframe pops open right below in chat. NEVER ask for card number, expiry, or CVV in chat text and NEVER tell them they must go elsewhere.]`
+        : `\n\n[PAYMENT FORM RULE: The customer wants to save/update their payment method. NEVER ask for card number, expiry date, or CVV in chat text! Instead, ask ONLY for their Customer Number or registered email so you can verify their account with a 6-digit OTP and immediately pop open the encrypted Westpac QuickStream card iframe right here in chat (or tell them they can sign into [My Account](/account) anytime).]`;
+    }
 
     if (activeSession?.custNo) {
       systemContent += `\n\n[VERIFIED SESSION ACTIVE]\nCustomer "${activeSession.custNo}" is ALREADY OTP-verified for this chat session until ${new Date(activeSession.expiresAt).toISOString()}. NEVER ask them to verify their session again or resend a login OTP while this session is active. Call requested account tools directly with custNo "${activeSession.custNo}". When they want to change registered email or phone, immediately call \`request_contact_update_otp\` to send a confirmation code to their NEW email/phone.`;
@@ -1731,6 +1800,8 @@ export class ChatService {
 
       const tools = this.getToolsSchema();
       let pendingUiAction: any = null;
+      let verifiedCustNoThisTurn = activeSession?.custNo ? String(activeSession.custNo) : '';
+      let otpVerifiedThisTurn = false;
 
       for (let step = 0; step < 6; step++) {
         const res = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -1779,6 +1850,17 @@ export class ChatService {
                 pendingUiAction = action;
               },
             );
+            if (tc.function?.name === 'verify_chat_otp' || tc.function?.name === 'register_new_customer') {
+              try {
+                const parsedTool = JSON.parse(toolResult);
+                if ((parsedTool?.verified || parsedTool?.registered) && parsedTool?.custNo) {
+                  verifiedCustNoThisTurn = String(parsedTool.custNo);
+                  otpVerifiedThisTurn = true;
+                }
+              } catch {
+                // ignore parse errors
+              }
+            }
             apiMessages.push({
               role: 'tool',
               tool_call_id: tc.id,
@@ -1788,7 +1870,30 @@ export class ChatService {
           continue;
         }
 
-        const reply = assistantMessage.content || 'How can I help with your JustMobile service today?';
+        let reply = assistantMessage.content || 'How can I help with your JustMobile service today?';
+        const recentCardSetupRequested = messages
+          .slice(-6)
+          .some((m) => m.role === 'user' && this.detectPaymentCardSetupIntent(m.content));
+
+        if (
+          !pendingUiAction &&
+          verifiedCustNoThisTurn &&
+          (isCardSetupIntent || (containsSensitive && hasCardDigits) || (otpVerifiedThisTurn && recentCardSetupRequested))
+        ) {
+          const authToken = await this.authService.issueTokenForCustomer(verifiedCustNoThisTurn);
+          pendingUiAction = {
+            type: 'QUICKSTREAM_PAYMENT',
+            custNo: verifiedCustNoThisTurn,
+            authToken,
+            purpose: 'update_card',
+            planName: 'JustMobile Direct Debit (Billing Cycle 28th)',
+          };
+          if (/provide.*card|enter.*card.*details.*here|type.*card/i.test(reply)) {
+            reply =
+              "I've opened the secure Westpac QuickStream card form right below. Please enter your card details inside the encrypted frame to save your Direct Debit payment method (you can also manage it anytime in [My Account](/account)).";
+          }
+        }
+
         return {
           reply,
           ...(pendingUiAction ? { uiAction: pendingUiAction } : {}),
