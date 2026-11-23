@@ -5,6 +5,7 @@ import type { OrderRecord } from './carrier.service';
 
 @Injectable()
 export class CarrierPortingWorker implements OnModuleInit, OnModuleDestroy {
+  private static readonly LIVE_OCTANE_POLL_INTERVAL_MS = 30 * 60 * 1000;
   private readonly logger = new Logger(CarrierPortingWorker.name);
   private isRunning = false;
   private intervalRef: NodeJS.Timeout | null = null;
@@ -18,7 +19,7 @@ export class CarrierPortingWorker implements OnModuleInit, OnModuleDestroy {
     // Run continuous background polling only in persistent server environments (not in serverless lambdas)
     if (!process.env.VERCEL) {
       this.intervalRef = setInterval(() => {
-        this.checkPendingPortingOrders().catch((err) =>
+        this.checkPendingPortingOrders({ respectPollBudget: true }).catch((err) =>
           this.logger.error(`Error in porting worker loop: ${err.message}`),
         );
       }, 30000);
@@ -32,11 +33,22 @@ export class CarrierPortingWorker implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Periodic background poller checking in-flight mobile porting orders (INT-10)
-   * Runs every 30 seconds to reconcile porting statuses with donor networks / Octane.
+   * Periodic background poller checking in-flight mobile porting orders (INT-10).
+   * Enforces the 30-minute per-order polling budget for live Octane orderQuery calls.
    */
-  async checkPendingPortingOrders() {
-    if (this.isRunning) return;
+  async checkPendingPortingOrders(options?: { respectPollBudget?: boolean }): Promise<{
+    checked: number;
+    skippedDueToBudget: number;
+    activated: number;
+    rejected: number;
+  }> {
+    const summary = {
+      checked: 0,
+      skippedDueToBudget: 0,
+      activated: 0,
+      rejected: 0,
+    };
+    if (this.isRunning) return summary;
     this.isRunning = true;
 
     try {
@@ -49,12 +61,11 @@ export class CarrierPortingWorker implements OnModuleInit, OnModuleDestroy {
         .toArray();
 
       if (!pendingOrders || pendingOrders.length === 0) {
-        return;
+        return summary;
       }
 
-      this.logger.log(`[PORTING WORKER] Checking ${pendingOrders.length} in-flight port-in orders...`);
-
       const isLive = process.env.TELCO_LIVE_CREATE === 'true';
+      const respectPollBudget = options?.respectPollBudget !== false;
 
       for (const order of pendingOrders) {
         try {
@@ -64,22 +75,43 @@ export class CarrierPortingWorker implements OnModuleInit, OnModuleDestroy {
             !/^(ORD|PORT|REP)-/i.test(String(order.orderId || ''));
 
           if (isLiveOrder) {
+            const lastQueriedAt = (order as any).lastQueriedAt
+              ? new Date((order as any).lastQueriedAt).getTime()
+              : 0;
+            if (
+              respectPollBudget &&
+              lastQueriedAt > 0 &&
+              Date.now() - lastQueriedAt < CarrierPortingWorker.LIVE_OCTANE_POLL_INTERVAL_MS
+            ) {
+              summary.skippedDueToBudget++;
+              continue;
+            }
+
+            await ordersCol.updateOne(
+              { orderId: order.orderId },
+              { $set: { lastQueriedAt: new Date() } as any },
+            );
+            summary.checked++;
             const live = await this.carrierService.queryOrder(order.orderId);
             this.logger.log(`[PORTING WORKER] Order ${order.orderId} live Octane status: ${live.status}`);
             if (live.status === 'ACTIVE') {
               await this.transitionToActive(order);
+              summary.activated++;
             } else if (live.status === 'REJECTED') {
+              summary.rejected++;
               this.logger.warn(
                 `[PORTING WORKER] Order ${order.orderId} rejected by donor carrier: ${live.rejectionReason || 'Donor rejected'}`,
               );
             }
           } else {
             // Sandbox / Non-live Simulation Mode only:
+            summary.checked++;
             const ageMs = Date.now() - new Date(order.createdAt || 0).getTime();
             const SIMULATED_PORT_DELAY_MS = 45000;
 
             if (ageMs >= SIMULATED_PORT_DELAY_MS) {
               await this.transitionToActive(order);
+              summary.activated++;
             } else {
               this.logger.log(
                 `[PORTING WORKER] Sandbox order ${order.orderId} (MSN: ${order.msn}) in progress (${Math.round(ageMs / 1000)}s / 45s).`,
@@ -90,8 +122,10 @@ export class CarrierPortingWorker implements OnModuleInit, OnModuleDestroy {
           this.logger.error(`[PORTING WORKER] Failed to check status for order ${order.orderId}:`, err.message);
         }
       }
+      return summary;
     } catch (err: any) {
       this.logger.error('[PORTING WORKER] Fatal error checking pending orders:', err.message);
+      return summary;
     } finally {
       this.isRunning = false;
     }

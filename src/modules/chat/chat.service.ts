@@ -638,14 +638,14 @@ export class ChatService {
         function: {
           name: 'open_quickstream_card_form',
           description:
-            'Open the secure Westpac QuickStream card iframe right inside the chat widget so the customer can register their Direct Debit card in Octane (never collect card details as chat text). For new_order or port_order, activation proceeds immediately after the card is saved.',
+            'Open the secure Westpac QuickStream card iframe right inside the chat widget so the customer can register their Direct Debit card in Octane (never collect card details as chat text). Use purpose "update_card" ONLY when updating/saving a payment card without ordering/activating a plan (it NEVER activates a plan or eSIM). For "new_order", `msn` MUST be an unmasked 04XX number explicitly chosen by the customer from `get_available_numbers` (never their existing contact phone). For "port_order", ACMA pre-port SMS OTP must be verified first via `send_port_sms_otp` and `verify_port_sms_otp`.',
           parameters: {
             type: 'object',
             properties: {
               custNo: { type: 'string' },
               purpose: { type: 'string', enum: ['new_order', 'port_order', 'update_card'] },
               planName: { type: 'string', description: 'Required for new_order or port_order e.g. JM 65GB Auto' },
-              msn: { type: 'string', description: 'Selected 04XX number or porting number (required for new_order / port_order)' },
+              msn: { type: 'string', description: 'Selected 04XX number from get_available_numbers (for new_order) or porting number (for port_order)' },
               numType: { type: 'string', enum: ['prepaid', 'postpaid'], description: 'Required for port_order' },
               donorCarrier: { type: 'string', description: 'Current carrier e.g. Telstra, Optus, Vodafone' },
               arn: { type: 'string', description: 'Postpaid account number (required for postpaid port_order)' },
@@ -1254,10 +1254,24 @@ export class ChatService {
           createdAt: new Date(),
         });
 
+        const supportNotified = await this.mailService
+          .sendSupportAlertEmail({
+            referenceNumber,
+            caseType: args.caseType,
+            custNo: args.custNo || null,
+            contactName: args.contactName || null,
+            contactEmail: args.contactEmail || null,
+            summary: args.summary,
+            desiredOutcome: args.desiredOutcome || null,
+            urgent: Boolean(args.urgent),
+          })
+          .catch(() => false);
+
         return JSON.stringify({
           success: true,
           referenceNumber,
           status: 'OPEN',
+          supportNotified,
           timeframe: args.urgent
             ? 'Urgent escalation — prioritised response within 2 business days (or immediate via 1300 492 002)'
             : 'Acknowledged within 2 business days; resolved within 15 business days',
@@ -1370,8 +1384,25 @@ export class ChatService {
 
       if (name === 'get_available_numbers') {
         const res = await this.carrierService.reserveNumbers(Number(args.qty) || 5);
+        const numbers = res?.numbers || [];
+        const reservedList = numbers
+          .map((n: any) => this.normalizeChatMsn(n?.number || n?.formatted || ''))
+          .filter((n: string) => /^04\d{8}$/.test(n));
+        if (reservedList.length > 0) {
+          await this.db
+            .getCollection('chat_reserved_numbers')
+            .updateOne(
+              { sessionId: cleanSessionId },
+              {
+                $addToSet: { numbers: { $each: reservedList } },
+                $set: { updatedAt: new Date() },
+              },
+              { upsert: true },
+            )
+            .catch(() => {});
+        }
         return JSON.stringify({
-          numbers: res?.numbers || [],
+          numbers,
         });
       }
 
@@ -1472,6 +1503,13 @@ export class ChatService {
         }
 
         if (purpose === 'update_card') {
+          if (String(args.planName || '').trim()) {
+            return JSON.stringify({
+              opened: false,
+              error:
+                'purpose "update_card" only saves a payment card and does NOT activate a mobile plan. Since a plan was selected, ask whether the customer wants a new 04XX number (call get_available_numbers) or to transfer an existing number (port_order with SMS OTP), then call open_quickstream_card_form with purpose "new_order" or "port_order".',
+            });
+          }
           const authToken = await this.authService.issueTokenForCustomer(custNo);
           onUiAction?.({
             type: 'QUICKSTREAM_PAYMENT',
@@ -1508,18 +1546,40 @@ export class ChatService {
         const rawMsn = String(args.msn || '').trim();
         let msn =
           rawMsn && !rawMsn.includes('*') ? this.normalizeChatMsn(rawMsn) : '';
-        if (!/^04\d{8}$/.test(msn)) {
-          if (purpose === 'port_order' && sessionDoc?.portOtpVerifiedNumber) {
-            msn = this.normalizeChatMsn(sessionDoc.portOtpVerifiedNumber);
-          } else {
-            msn = this.normalizeChatMsn(customer?.phone || liveCustomer?.phone || '');
+        if (purpose === 'new_order') {
+          if (!/^04\d{8}$/.test(msn)) {
+            return JSON.stringify({
+              opened: false,
+              requiresNumberSelection: true,
+              error:
+                'Before opening checkout for a new plan, ask whether the customer wants a brand-new 04XX number or wants to transfer their existing number. For a new number, call get_available_numbers and let the customer choose one first.',
+            });
           }
-        }
-        if (!msn || !/^04\d{8}$/.test(msn)) {
-          return JSON.stringify({
-            opened: false,
-            error: 'Please select an available 04XX mobile number or provide your 10-digit Australian mobile number first.',
-          });
+          const reservedDoc: any = await this.db
+            .getCollection('chat_reserved_numbers')
+            .findOne({ sessionId: cleanSessionId });
+          if (!Array.isArray(reservedDoc?.numbers) || !reservedDoc.numbers.includes(msn)) {
+            return JSON.stringify({
+              opened: false,
+              requiresNumberSelection: true,
+              error:
+                'The msn for a new_order must be a freshly reserved 04XX number selected by the customer from get_available_numbers (never their existing personal contact number). Call get_available_numbers first for a new number, or use purpose "port_order" with SMS OTP verification if they want to keep their existing number.',
+            });
+          }
+        } else {
+          if (!/^04\d{8}$/.test(msn)) {
+            if (sessionDoc?.portOtpVerifiedNumber) {
+              msn = this.normalizeChatMsn(sessionDoc.portOtpVerifiedNumber);
+            } else {
+              msn = this.normalizeChatMsn(customer?.phone || liveCustomer?.phone || '');
+            }
+          }
+          if (!msn || !/^04\d{8}$/.test(msn)) {
+            return JSON.stringify({
+              opened: false,
+              error: 'Please select an available 04XX mobile number or provide your 10-digit Australian mobile number first.',
+            });
+          }
         }
 
         let numType: 'prepaid' | 'postpaid' | undefined;

@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException, HttpException, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, HttpException, HttpStatus, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { MailService } from '../mail/mail.service';
 import * as soap from 'soap';
@@ -2109,10 +2109,34 @@ export class CarrierService {
       );
     }
 
+    const cleanCustNo = (custNo || '').trim();
+    const rateLimitCol = this.db.getCollection('otp_rate_limits');
+    if (typeof rateLimitCol?.countDocuments === 'function') {
+      const windowStart = new Date(Date.now() - 15 * 60 * 1000);
+      const orClauses: any[] = [{ destination: cleanDestination }];
+      if (cleanCustNo) {
+        orClauses.push({ custNo: cleanCustNo });
+      }
+      const recentCount = await rateLimitCol.countDocuments({
+        $or: orClauses,
+        createdAt: { $gte: windowStart },
+      });
+      if (recentCount >= 5) {
+        throw new HttpException(
+          'Too many SMS verification requests. Please wait 15 minutes before trying again.',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+      await rateLimitCol.insertOne({
+        custNo: cleanCustNo || null,
+        destination: cleanDestination,
+        createdAt: new Date(),
+      });
+    }
+
     const transactionId = `TX-PORT-${Date.now()}`;
     const mockCode = '829104';
 
-    const cleanCustNo = (custNo || '').trim();
     const isLive = process.env.TELCO_LIVE_CREATE === 'true' && (!cleanCustNo || /^\d+$/.test(cleanCustNo));
 
     if (isLive) {

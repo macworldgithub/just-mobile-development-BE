@@ -1503,4 +1503,105 @@ export class AuthService implements OnModuleInit {
     };
     return payload;
   }
+
+  async getAdminSupportCases(authHeader?: string) {
+    await this.verifyAdminAccess(authHeader);
+
+    const [complaints, tickets, billQueries] = await Promise.all([
+      this.db.getCollection('complaints').find({}).sort({ createdAt: -1 }).limit(100).toArray(),
+      this.db.getCollection('support_tickets').find({}).sort({ createdAt: -1 }).limit(100).toArray(),
+      this.db.getCollection('bill_queries').find({}).sort({ createdAt: -1 }).limit(100).toArray(),
+    ]);
+
+    const normalizeCase = (doc: any, collection: 'complaints' | 'support_tickets' | 'bill_queries') => ({
+      id: doc._id ? String(doc._id) : String(doc.referenceNumber || doc.queryId || ''),
+      collection,
+      referenceNumber: String(doc.referenceNumber || doc.queryId || ''),
+      caseType:
+        doc.caseType ||
+        (collection === 'complaints'
+          ? 'complaint'
+          : collection === 'bill_queries'
+            ? 'billing_dispute'
+            : 'support_ticket'),
+      custNo: doc.custNo ? String(doc.custNo) : null,
+      contactName: doc.contactName || doc.name || null,
+      contactEmail: doc.contactEmail || doc.email || null,
+      summary: doc.summary || doc.message || '',
+      desiredOutcome: doc.desiredOutcome || null,
+      invoiceId: doc.invoiceId || null,
+      category: doc.category || null,
+      urgent: Boolean(doc.urgent),
+      status: String(doc.status || 'OPEN').toUpperCase(),
+      adminNote: doc.adminNote || null,
+      createdAt: doc.createdAt || new Date(),
+      updatedAt: doc.updatedAt || doc.createdAt || new Date(),
+    });
+
+    const cases = [
+      ...complaints.map((d: any) => normalizeCase(d, 'complaints')),
+      ...tickets.map((d: any) => normalizeCase(d, 'support_tickets')),
+      ...billQueries.map((d: any) => normalizeCase(d, 'bill_queries')),
+    ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    const counts = {
+      total: cases.length,
+      open: cases.filter((c) => c.status === 'OPEN').length,
+      inProgress: cases.filter((c) => c.status === 'IN_PROGRESS').length,
+      resolved: cases.filter((c) => c.status === 'RESOLVED').length,
+      urgentOpen: cases.filter((c) => c.urgent && c.status !== 'RESOLVED').length,
+    };
+
+    return {
+      success: true,
+      counts,
+      cases,
+    };
+  }
+
+  async updateAdminSupportCaseStatus(
+    authHeader: string | undefined,
+    dto: { collection: string; referenceNumber: string; status: string; adminNote?: string },
+  ) {
+    await this.verifyAdminAccess(authHeader);
+
+    const allowedCollections = ['complaints', 'support_tickets', 'bill_queries'];
+    const allowedStatuses = ['OPEN', 'IN_PROGRESS', 'RESOLVED'];
+    const cleanCollection = String(dto?.collection || '').trim();
+    const cleanRef = String(dto?.referenceNumber || '').trim();
+    const cleanStatus = String(dto?.status || '').trim().toUpperCase();
+
+    if (!allowedCollections.includes(cleanCollection)) {
+      throw new BadRequestException('Invalid support case collection.');
+    }
+    if (!cleanRef) {
+      throw new BadRequestException('Reference number is required.');
+    }
+    if (!allowedStatuses.includes(cleanStatus)) {
+      throw new BadRequestException('Invalid case status.');
+    }
+
+    const updateFields: Record<string, any> = {
+      status: cleanStatus,
+      updatedAt: new Date(),
+    };
+    if (dto.adminNote !== undefined) {
+      updateFields.adminNote = String(dto.adminNote).trim();
+    }
+
+    const res = await this.db.getCollection(cleanCollection).updateOne(
+      { $or: [{ referenceNumber: cleanRef }, { queryId: cleanRef }] },
+      { $set: updateFields },
+    );
+
+    if (!res.matchedCount) {
+      throw new NotFoundException(`Support case ${cleanRef} not found.`);
+    }
+
+    return {
+      success: true,
+      referenceNumber: cleanRef,
+      status: cleanStatus,
+    };
+  }
 }

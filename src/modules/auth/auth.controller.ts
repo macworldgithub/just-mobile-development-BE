@@ -168,4 +168,18 @@ export class AuthController {
   async getAdminStats(@Headers('authorization') authHeader?: string) {
     return this.authService.getAdminStats(authHeader);
   }
+
+  @Get('admin/support-cases')
+  async getAdminSupportCases(@Headers('authorization') authHeader?: string) {
+    return this.authService.getAdminSupportCases(authHeader);
+  }
+
+  @Post('admin/support-cases/status')
+  @HttpCode(HttpStatus.OK)
+  async updateAdminSupportCaseStatus(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body: { collection: string; referenceNumber: string; status: string; adminNote?: string },
+  ) {
+    return this.authService.updateAdminSupportCaseStatus(authHeader, body);
+  }
 }

@@ -706,4 +706,100 @@ export class MailService {
       return false;
     }
   }
+
+  /**
+   * Notify JustMobile support inbox whenever a complaint, ticket, escalation, or bill dispute is logged.
+   */
+  async sendSupportAlertEmail(input: {
+    referenceNumber: string;
+    caseType: string;
+    custNo?: string | null;
+    contactName?: string | null;
+    contactEmail?: string | null;
+    summary: string;
+    desiredOutcome?: string | null;
+    urgent?: boolean;
+    invoiceId?: string | null;
+    category?: string | null;
+  }): Promise<boolean> {
+    if (!this.transporter) {
+      this.initTransporter();
+    }
+    if (!this.transporter) {
+      this.logger.warn(`Support alert skipped (SMTP not initialized) for ${input.referenceNumber}`);
+      return false;
+    }
+
+    const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@justmobile.com.au';
+    const supportInbox = process.env.SUPPORT_ALERT_EMAIL || 'info@justmobile.ai';
+    const sender = `"JustMobile Support Alerts" <${fromEmail}>`;
+    const typeLabel = String(input.caseType || 'support_ticket').replace(/_/g, ' ').toUpperCase();
+    const subject = `${input.urgent ? '[URGENT] ' : ''}[${typeLabel}] ${input.referenceNumber}${
+      input.custNo ? ` · Cust #${input.custNo}` : ''
+    }`;
+
+    const escapeHtml = (v?: string | null) =>
+      String(v || '—')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+    const text = [
+      `Reference: ${input.referenceNumber}`,
+      `Type: ${typeLabel}${input.urgent ? ' (URGENT)' : ''}`,
+      `Customer Number: ${input.custNo || 'Unverified / Guest'}`,
+      `Contact Name: ${input.contactName || 'Not provided'}`,
+      `Contact Email: ${input.contactEmail || 'Not provided'}`,
+      ...(input.invoiceId ? [`Invoice ID: ${input.invoiceId}`] : []),
+      ...(input.category ? [`Category: ${input.category}`] : []),
+      `Summary: ${input.summary}`,
+      ...(input.desiredOutcome ? [`Desired Outcome: ${input.desiredOutcome}`] : []),
+    ].join('\n');
+
+    const html = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; max-width: 620px; margin: 0 auto; padding: 26px; background: #ffffff; border: 1px solid #dce4d8; border-radius: 14px;">
+        <div style="background: #142420; color: #ffffff; padding: 16px 20px; border-radius: 10px; margin-bottom: 18px;">
+          <div style="font-size: 11px; font-weight: 800; color: ${input.urgent ? '#fca5a5' : '#D5F879'}; letter-spacing: 0.08em; text-transform: uppercase;">
+            ${input.urgent ? 'URGENT ESCALATION · ' : ''}${escapeHtml(typeLabel)}
+          </div>
+          <h2 style="margin: 4px 0 0 0; font-size: 18px; color: #ffffff;">Case ${escapeHtml(input.referenceNumber)}</h2>
+        </div>
+        <table style="width: 100%; border-collapse: collapse; font-size: 13.5px; margin-bottom: 16px;">
+          <tr><td style="padding: 6px 0; color: #58615F; width: 150px;"><strong>Customer #:</strong></td><td style="padding: 6px 0; color: #142420;">${escapeHtml(input.custNo || 'Unverified / Guest')}</td></tr>
+          <tr><td style="padding: 6px 0; color: #58615F;"><strong>Contact Name:</strong></td><td style="padding: 6px 0; color: #142420;">${escapeHtml(input.contactName)}</td></tr>
+          <tr><td style="padding: 6px 0; color: #58615F;"><strong>Contact Email:</strong></td><td style="padding: 6px 0; color: #142420;">${escapeHtml(input.contactEmail)}</td></tr>
+          ${input.invoiceId ? `<tr><td style="padding: 6px 0; color: #58615F;"><strong>Invoice ID:</strong></td><td style="padding: 6px 0; color: #142420;">${escapeHtml(input.invoiceId)}</td></tr>` : ''}
+          ${input.category ? `<tr><td style="padding: 6px 0; color: #58615F;"><strong>Category:</strong></td><td style="padding: 6px 0; color: #142420;">${escapeHtml(input.category)}</td></tr>` : ''}
+        </table>
+        <div style="background: #f9fbf8; border: 1px solid #e2ebe0; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px;">
+          <div style="font-size: 11.5px; font-weight: 700; color: #58615F; text-transform: uppercase; margin-bottom: 6px;">Summary</div>
+          <div style="font-size: 14px; color: #142420; line-height: 1.55; white-space: pre-line;">${escapeHtml(input.summary)}</div>
+        </div>
+        ${
+          input.desiredOutcome
+            ? `<div style="background: #f9fbf8; border: 1px solid #e2ebe0; border-radius: 10px; padding: 14px 16px;">
+                <div style="font-size: 11.5px; font-weight: 700; color: #58615F; text-transform: uppercase; margin-bottom: 6px;">Desired Outcome</div>
+                <div style="font-size: 13.5px; color: #142420; line-height: 1.5;">${escapeHtml(input.desiredOutcome)}</div>
+              </div>`
+            : ''
+        }
+      </div>
+    `;
+
+    try {
+      const info = await this.transporter.sendMail({
+        from: sender,
+        to: supportInbox,
+        ...(input.contactEmail && input.contactEmail.includes('@') ? { replyTo: input.contactEmail } : {}),
+        subject,
+        text,
+        html,
+      });
+      this.logger.log(`✓ Support alert email sent to ${supportInbox} for ${input.referenceNumber}: ${info.messageId}`);
+      return true;
+    } catch (err: any) {
+      this.logger.warn(`Support alert email warning for ${input.referenceNumber}: ${err.message}`);
+      return false;
+    }
+  }
 }

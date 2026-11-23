@@ -14,6 +14,7 @@ import {
   BadRequestException,
   ForbiddenException,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { CarrierService } from './carrier.service';
@@ -363,13 +364,71 @@ export class CarrierController {
 
   @Post('otp/send')
   @HttpCode(HttpStatus.OK)
-  async sendOtp(@Body() body: { custNo: string; destination: string }) {
-    return this.carrierService.sendPrePortOtp(body.custNo, body.destination);
+  async sendOtp(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body: { custNo?: string; destination: string },
+  ) {
+    const caller = await this.authService.verifyCustomerAccess(authHeader, body?.custNo);
+    const effectiveCustNo = String(body?.custNo || caller.custNo || '').trim();
+    return this.carrierService.sendPrePortOtp(effectiveCustNo, body?.destination || '');
   }
 
   @Post('otp/verify')
   @HttpCode(HttpStatus.OK)
-  async verifyOtp(@Body() body: { transactionId: string; code: string }) {
-    return this.carrierService.verifyPrePortOtp(body.transactionId, body.code);
+  async verifyOtp(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body: { transactionId: string; code: string },
+  ) {
+    await this.authService.verifyCustomerAccess(authHeader);
+    return this.carrierService.verifyPrePortOtp(body?.transactionId || '', body?.code || '');
+  }
+
+  // ==========================================================================
+  // SERVERLESS PORTING SYNC CRON ENDPOINTS (INT-10)
+  // ==========================================================================
+
+  private async handleCronSyncPorts(
+    authHeader: string | undefined,
+    cronSecretHeader: string | undefined,
+  ) {
+    const configuredSecret = (process.env.CRON_SECRET || '').trim();
+    const bearerSecret =
+      authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const matchesCronSecret =
+      Boolean(configuredSecret) &&
+      (cronSecretHeader?.trim() === configuredSecret || bearerSecret === configuredSecret);
+
+    if (!matchesCronSecret) {
+      try {
+        await this.authService.verifyAdminAccess(authHeader);
+      } catch {
+        throw new UnauthorizedException('Valid cron secret or admin token required.');
+      }
+    }
+
+    const summary = await this.portingWorker.checkPendingPortingOrders({
+      respectPollBudget: true,
+    });
+    return {
+      success: true,
+      ...summary,
+    };
+  }
+
+  @Get('cron/sync-ports')
+  async syncPortsCronGet(
+    @Headers('authorization') authHeader?: string,
+    @Headers('x-cron-secret') cronSecretHeader?: string,
+  ) {
+    return this.handleCronSyncPorts(authHeader, cronSecretHeader);
+  }
+
+  @Post('cron/sync-ports')
+  @HttpCode(HttpStatus.OK)
+  async syncPortsCronPost(
+    @Headers('authorization') authHeader?: string,
+    @Headers('x-cron-secret') cronSecretHeader?: string,
+  ) {
+    return this.handleCronSyncPorts(authHeader, cronSecretHeader);
   }
 }

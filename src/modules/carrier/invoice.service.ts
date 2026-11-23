@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException, BadRequestException, Inject, forwardRef } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { CarrierService } from './carrier.service';
+import { MailService } from '../mail/mail.service';
 import PDFDocument from 'pdfkit';
 
 export interface InvoiceRecord {
@@ -28,6 +29,7 @@ export class InvoiceService {
     private readonly db: DatabaseService,
     @Inject(forwardRef(() => CarrierService))
     private readonly carrierService: CarrierService,
+    private readonly mailService: MailService,
   ) {}
 
   /**
@@ -202,16 +204,38 @@ export class InvoiceService {
       throw new NotFoundException(`No tax invoice found for customer ${custNo}.`);
     }
 
-    // Lookup customer details
+    // Lookup customer details (support both string and numeric custNo storage, with live Octane fallback)
+    const cleanCustNo = String(custNo || '').trim();
+    const digitsOnly = cleanCustNo.replace(/\D+/g, '');
+    const numericVal = digitsOnly ? parseInt(digitsOnly, 10) : NaN;
+    const userFilter: any[] = [{ custNo: cleanCustNo }];
+    if (!isNaN(numericVal)) {
+      userFilter.push({ custNo: numericVal });
+    }
     const usersCol = this.db.getCollection('users');
-    const user = await usersCol.findOne({ custNo });
+    const user = await usersCol.findOne({ $or: userFilter });
 
-    const customerName = user?.name || 'Jordan Miller';
-    const customerAddress = user?.address
-      ? `${user.address}, ${user.suburb || 'Sydney'} ${user.state || 'NSW'} ${user.postcode || '2000'}`
-      : 'Unit 4, 182 George Street, Sydney NSW 2000';
-    const customerEmail = user?.email || 'jordan.miller@example.com';
-    const customerPhone = user?.phone || '0491 570 006';
+    const liveCustomer =
+      (!user?.name || !user?.email) && /^\d+$/.test(cleanCustNo)
+        ? await this.carrierService.getCustomer(cleanCustNo).catch(() => null)
+        : null;
+
+    const isSandboxDemo = cleanCustNo === 'CUST990001';
+    const customerName =
+      user?.name || liveCustomer?.name || (isSandboxDemo ? 'Jordan Miller' : `Customer ${cleanCustNo}`);
+    const customerEmail =
+      user?.email || liveCustomer?.email || (isSandboxDemo ? 'jordan.miller@example.com' : 'Not provided');
+    const customerPhone =
+      user?.phone || liveCustomer?.phone || (isSandboxDemo ? '0491 570 006' : 'Not provided');
+
+    const fmtDayMonth = (iso?: string) => {
+      const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+      return m ? `${m[3]}/${m[2]}` : String(iso || '');
+    };
+    const startDm = fmtDayMonth(targetInvoice.periodStart);
+    const endDm = fmtDayMonth(targetInvoice.periodEnd);
+    const periodCellText =
+      startDm && endDm && startDm !== endDm ? `${startDm}–${endDm}` : startDm || endDm || targetInvoice.issueDate;
 
     return new Promise<Buffer>((resolve, reject) => {
       try {
@@ -237,8 +261,8 @@ export class InvoiceService {
         doc.rect(0, 0, doc.page.width, 90).fill('#142420');
 
         // Brand Name
-        doc.fillColor('#D5F879').fontSize(22).font('Helvetica-Bold').text('just more', 45, 28, { continued: true });
-        doc.fillColor('#FFFFFF').text(' mobile.');
+        doc.fillColor('#FFFFFF').fontSize(22).font('Helvetica-Bold').text('justmobile', 45, 28, { continued: true });
+        doc.fillColor('#D5F879').text('.');
 
         doc.fillColor('#A8B8A5').fontSize(10).font('Helvetica').text('A little less telco. A lot more you.', 45, 54);
 
@@ -334,7 +358,7 @@ export class InvoiceService {
         doc.text(`• ${targetInvoice.dataAllowance || 'Monthly 5G Data'} on Telstra Wholesale Network`, 55, y + 35);
 
         doc.fillColor('#142420').fontSize(8).font('Helvetica');
-        doc.text('28/10–27/11', 310, y + 10);
+        doc.text(periodCellText, 310, y + 10);
         doc.text('1', 395, y + 10);
         doc.text(`$${targetInvoice.subtotal.toFixed(2)}`, 430, y + 10);
         doc.text(`$${targetInvoice.gstAmount.toFixed(2)}`, 485, y + 10);
@@ -503,6 +527,20 @@ export class InvoiceService {
 
     const queriesCol = this.db.getCollection('bill_queries');
     await queriesCol.insertOne(doc);
+
+    await this.mailService
+      .sendSupportAlertEmail({
+        referenceNumber: queryId,
+        caseType: 'billing_dispute',
+        custNo,
+        contactName: doc.name || null,
+        contactEmail: doc.email || null,
+        summary: doc.message,
+        invoiceId: doc.invoiceId,
+        category: doc.category,
+        urgent: false,
+      })
+      .catch(() => false);
 
     this.logger.log(`✓ Bill query ${queryId} logged for custNo ${custNo} (Invoice: ${doc.invoiceId})`);
 

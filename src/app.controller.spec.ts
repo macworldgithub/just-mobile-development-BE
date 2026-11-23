@@ -1,9 +1,10 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, HttpException } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { CarrierService } from './modules/carrier/carrier.service';
 import { CarrierController } from './modules/carrier/carrier.controller';
+import { CarrierPortingWorker } from './modules/carrier/carrier-porting.worker';
 import { ChatService } from './modules/chat/chat.service';
 
 describe('AppController', () => {
@@ -699,12 +700,13 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
     jest.restoreAllMocks();
   });
 
-  function makeOtpCarrierService() {
+  function makeOtpCarrierService(recentCount = 0) {
     const mockDb: any = {
       getCollection: jest.fn(() => ({
         insertOne: jest.fn(),
         findOne: jest.fn(),
         updateOne: jest.fn(),
+        countDocuments: jest.fn().mockResolvedValue(recentCount),
       })),
     };
     const mockMail: any = { sendMail: jest.fn() };
@@ -793,34 +795,55 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
   });
 
   it('ChatService send_port_sms_otp resolves saved registered phone when destination is masked/omitted, and open_quickstream_card_form auto-hydrates dob & msn', async () => {
+    const reservedBySession = new Map<string, string[]>();
     const updateOneMock = jest.fn().mockResolvedValue({ modifiedCount: 1 });
-    const findOneMock = jest.fn().mockImplementation((query: any) => {
-      if (query?.orderType === 'PORT_IN') return Promise.resolve(null);
-      if (query?.sessionId) {
-        return Promise.resolve({
-          sessionId: 'sess-existing-1',
-          custNo: '551059',
-          active: true,
-          expiresAt: new Date(Date.now() + 600000),
-          portOtpVerified: true,
-          portOtpVerifiedNumber: '0412345678',
-        });
-      }
-      return Promise.resolve({
-        custNo: '551059',
-        email: 'yaseen@neximet.com',
-        firstName: 'Yaseen',
-        surname: 'Jamal',
-        phone: '0412 345 678',
-        dob: '23/11/2002',
-        address: '100 George St',
-        suburb: 'Sydney',
-        state: 'NSW',
-        postcode: '2000',
-      });
-    });
     const mockDb: any = {
-      getCollection: jest.fn(() => ({ findOne: findOneMock, updateOne: updateOneMock })),
+      getCollection: jest.fn((name: string) => {
+        if (name === 'chat_reserved_numbers') {
+          return {
+            updateOne: jest.fn(async (filter: any, update: any) => {
+              const sid = filter?.sessionId || 'default-session';
+              const incoming: string[] = update?.$addToSet?.numbers?.$each || [];
+              const prev = reservedBySession.get(sid) || [];
+              reservedBySession.set(sid, Array.from(new Set([...prev, ...incoming])));
+              return { modifiedCount: 1 };
+            }),
+            findOne: jest.fn(async (filter: any) => {
+              const sid = filter?.sessionId || 'default-session';
+              const nums = reservedBySession.get(sid) || [];
+              return nums.length > 0 ? { sessionId: sid, numbers: nums } : null;
+            }),
+          };
+        }
+        return {
+          updateOne: updateOneMock,
+          findOne: jest.fn().mockImplementation((query: any) => {
+            if (query?.orderType === 'PORT_IN') return Promise.resolve(null);
+            if (query?.sessionId) {
+              return Promise.resolve({
+                sessionId: 'sess-existing-1',
+                custNo: '551059',
+                active: true,
+                expiresAt: new Date(Date.now() + 600000),
+                portOtpVerified: true,
+                portOtpVerifiedNumber: '0412345678',
+              });
+            }
+            return Promise.resolve({
+              custNo: '551059',
+              email: 'yaseen@neximet.com',
+              firstName: 'Yaseen',
+              surname: 'Jamal',
+              phone: '0412 345 678',
+              dob: '23/11/2002',
+              address: '100 George St',
+              suburb: 'Sydney',
+              state: 'NSW',
+              postcode: '2000',
+            });
+          }),
+        };
+      }),
     };
     const sendPrePortOtpMock = jest.fn().mockResolvedValue({
       success: true,
@@ -828,11 +851,14 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
       destination: '0412345678',
       message: 'ACMA security code dispatched via SMS to 0412345678.',
     });
+    const reserveNumbersMock = jest.fn().mockResolvedValue({
+      numbers: [{ id: 'RES-1', number: '0488912101', formatted: '0488 912 101' }],
+    });
     const issueTokenMock = jest.fn().mockResolvedValue('jwt-551059');
     const chatService = new ChatService(
       mockDb,
       {} as any,
-      { sendPrePortOtp: sendPrePortOtpMock } as any,
+      { sendPrePortOtp: sendPrePortOtpMock, reserveNumbers: reserveNumbersMock } as any,
       {} as any,
       { issueTokenForCustomer: issueTokenMock } as any,
     );
@@ -908,7 +934,45 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
     expect(removed10.opened).toBe(false);
     expect(removed10.error).toMatch(/15GB, 45GB/);
 
-    // 150GB must resolve to 11144170 ($62), never collide with 15GB (11144154)
+    // update_card must reject calls that pass a planName
+    const badUpdateCard = JSON.parse(
+      await chatService.executeToolCall(
+        'open_quickstream_card_form',
+        JSON.stringify({
+          custNo: '551059',
+          purpose: 'update_card',
+          planName: 'JM 15GB Auto',
+        }),
+        [],
+        'sess-existing-1',
+      ),
+    );
+    expect(badUpdateCard.opened).toBe(false);
+
+    // new_order must reject an unreserved MSN (such as the customer's existing contact phone)
+    const unreservedNew = JSON.parse(
+      await chatService.executeToolCall(
+        'open_quickstream_card_form',
+        JSON.stringify({
+          custNo: '551059',
+          purpose: 'new_order',
+          planName: '150GB',
+          msn: '0412345678',
+        }),
+        [],
+        'sess-existing-1',
+      ),
+    );
+    expect(unreservedNew.opened).toBe(false);
+    expect(unreservedNew.requiresNumberSelection).toBe(true);
+
+    // Reserve a fresh number first, then 150GB must resolve to 11144170 ($62) without 15GB collision
+    await chatService.executeToolCall(
+      'get_available_numbers',
+      JSON.stringify({ qty: 5 }),
+      [],
+      'sess-existing-1',
+    );
     const emitted150: any[] = [];
     const res150 = JSON.parse(
       await chatService.executeToolCall(
@@ -917,7 +981,7 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
           custNo: '551059',
           purpose: 'new_order',
           planName: '150GB',
-          msn: '0412345678',
+          msn: '0488912101',
         }),
         [],
         'sess-existing-1',
@@ -929,6 +993,67 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
       expect.objectContaining({
         planNo: '11144170',
         planPrice: 62,
+      }),
+    );
+  });
+
+  it('CarrierController.sendOtp & verifyOtp enforce verifyCustomerAccess and sendPrePortOtp enforces 5/15m rate limit', async () => {
+    const verifyCustomerAccess = jest.fn().mockRejectedValue(new ForbiddenException('Auth required'));
+    const controller = new CarrierController(
+      { sendPrePortOtp: jest.fn(), verifyPrePortOtp: jest.fn() } as any,
+      {} as any,
+      {} as any,
+      { verifyCustomerAccess } as any,
+    );
+
+    await expect(
+      controller.sendOtp(undefined, { custNo: '551059', destination: '0412345678' }),
+    ).rejects.toThrow(ForbiddenException);
+    await expect(
+      controller.verifyOtp(undefined, { transactionId: 'TX-1', code: '123456' }),
+    ).rejects.toThrow(ForbiddenException);
+
+    const rateLimitedService = makeOtpCarrierService(5);
+    await expect(rateLimitedService.sendPrePortOtp('551059', '0412345678')).rejects.toThrow(
+      HttpException,
+    );
+  });
+
+  it('CarrierPortingWorker enforces 30-minute live Octane polling budget per order', async () => {
+    process.env.TELCO_LIVE_CREATE = 'true';
+    const recentOrder = {
+      orderId: '991122',
+      custNo: '551059',
+      msn: '0412345678',
+      orderType: 'PORT_IN',
+      status: 'PORT_IN_PROGRESS',
+      lastQueriedAt: new Date(Date.now() - 5 * 60 * 1000),
+    };
+    const staleOrder = {
+      orderId: '991123',
+      custNo: '551059',
+      msn: '0412345679',
+      orderType: 'PORT_IN',
+      status: 'PORT_IN_PROGRESS',
+      lastQueriedAt: new Date(Date.now() - 35 * 60 * 1000),
+    };
+    const updateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 });
+    const mockDb: any = {
+      getCollection: jest.fn(() => ({
+        find: jest.fn(() => ({ toArray: jest.fn().mockResolvedValue([recentOrder, staleOrder]) })),
+        updateOne,
+      })),
+    };
+    const queryOrder = jest.fn().mockResolvedValue({ status: 'PORT_IN_PROGRESS' });
+    const worker = new CarrierPortingWorker(mockDb, { queryOrder } as any);
+
+    const summary = await worker.checkPendingPortingOrders({ respectPollBudget: true });
+    expect(queryOrder).toHaveBeenCalledTimes(1);
+    expect(queryOrder).toHaveBeenCalledWith('991123');
+    expect(summary).toEqual(
+      expect.objectContaining({
+        checked: 1,
+        skippedDueToBudget: 1,
       }),
     );
   });
