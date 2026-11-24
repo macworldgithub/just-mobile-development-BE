@@ -20,4 +20,9 @@ export class ChatController {
 
     return await this.chatService.generateResponse(body.messages, body.sessionId, authHeader);
   }
+
+  @Post('reset')
+  async resetSession(@Body() body?: { sessionId?: string }) {
+    return await this.chatService.resetChatSession(body?.sessionId);
+  }
 }

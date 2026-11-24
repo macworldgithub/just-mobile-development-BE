@@ -97,7 +97,7 @@ These credentials are confirmed from the working legacy deployment:
 | Variable | Value | Description |
 | :--- | :--- | :--- |
 | `groupNo` | `922` | JustMobile Wholesale Group ID in Octane |
-| `quickstreamApiKey` | `C01967_SEC_cjpde5i6crnxs794ek6nq7ybi3qs3nqdp2w37mzwecbaktfm6k2kjequ4rt4` | Westpac QuickStream Backend Secret |
+| `quickstreamApiKey` | `<REDACTED — configure in backend .env / Vercel Environment Variables>` | Westpac QuickStream Backend Secret |
 | `publishableApiKey` | `TIAB_PUB_sawvcp2cgmdfiyehcysqpe6qh6ajk4pbhgasz3t9tetu7t3r9p767ygsmmxm` | Westpac QuickStream Frontend Public Key |
 | `supplierBusinessCode` | `TIABREST` / `C01967` | Westpac Merchant Settlement Account Code |
 | `quickstreamCdnUrl` | `https://api.quickstream.westpac.com.au/rest/v1/quickstream-api-1.0.min.js` | Official Westpac JS SDK |

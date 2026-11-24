@@ -98,16 +98,29 @@ export class ChatService {
     return cardPattern.test(text) || sensitivePhrase.test(text);
   }
 
+  private buildCustNoFilter(custNo: string): Record<string, any> {
+    const clean = String(custNo || '').trim();
+    const digits = clean.replace(/\D+/g, '');
+    const numericVal = digits ? parseInt(digits, 10) : NaN;
+    const orClauses: any[] = [{ custNo: clean }];
+    if (!isNaN(numericVal)) {
+      orClauses.push({ custNo: numericVal });
+    }
+    return { $or: orClauses };
+  }
+
   private detectPaymentCardSetupIntent(text: string): boolean {
     if (!text) return false;
+    const hasOrderAction =
+      /\b(buy|purchase|order|activate|new number|port|transfer|switch|sign ?up)\b/i.test(text);
     const hasPlanOrOrderTerms =
-      /\b(15|45|65|100|120|150|180)\s*gb\b|\b(plan|plans|esim|sim|new number|port|transfer|switch|activate)\b/i.test(
+      /\b(15|45|65|100|120|150|180)\s*gb\b|\b(plan|plans|esim|sim|number|port|transfer)\b/i.test(
         text,
       );
-    if (hasPlanOrOrderTerms) return false;
+    if (hasOrderAction && hasPlanOrOrderTerms) return false;
     const cardActionPattern =
-      /\b(save|add|set ?up|setup|update|change|register|enter|link|put|store|open)\b.{0,35}\b(payment|card|credit card|debit card|direct debit|auto.?pay|billing method)\b/i;
-    const cardNounPattern = /\b(payment method|payment form|card form|direct debit card)\b/i;
+      /\b(save|add|set(?: ?up)?|setup|update|change|register|enter|link|put|store|open|configure|attach)\b.{0,40}\b(payment|card|credit card|debit card|direct debit|auto.?pay|billing(?: method| card| details)?)\b/i;
+    const cardNounPattern = /\b(payment method|payment form|card form|direct debit card|direct debit)\b/i;
     return cardActionPattern.test(text) || cardNounPattern.test(text);
   }
 
@@ -858,35 +871,94 @@ export class ChatService {
       if (name === 'request_contact_update_otp') {
         const custNo = String(args.custNo || '').trim();
         if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
-          return JSON.stringify({ success: false, error: 'OTP verification of current session required first.' });
+          return JSON.stringify({ success: false, otpSent: false, error: 'OTP verification of current session required first.' });
         }
         const targetEmail = args.newEmail ? String(args.newEmail).trim().toLowerCase() : null;
-        const targetPhone = args.newPhone ? String(args.newPhone).trim() : null;
-        if (!targetEmail && !targetPhone) {
-          return JSON.stringify({ success: false, error: 'Provide the new email address or phone number to verify.' });
+        const rawPhone = args.newPhone ? String(args.newPhone).trim() : null;
+        const normalizedPhone = rawPhone ? this.normalizeChatMsn(rawPhone) : null;
+
+        if (!targetEmail && !rawPhone) {
+          return JSON.stringify({ success: false, otpSent: false, error: 'Provide the new email address or phone number to verify.' });
         }
+        if (targetEmail && (!targetEmail.includes('@') || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(targetEmail))) {
+          return JSON.stringify({ success: false, otpSent: false, error: 'Please provide a valid email address.' });
+        }
+        if (rawPhone && (!normalizedPhone || !/^04\d{8}$/.test(normalizedPhone))) {
+          return JSON.stringify({
+            success: false,
+            otpSent: false,
+            error: 'Please provide a valid 10-digit Australian 04XX mobile number (e.g. 0412 345 678).',
+          });
+        }
+
+        const customer = await this.findCustomerByIdentifier(custNo);
+        const liveCustomer =
+          !targetEmail && !customer?.email && typeof this.carrierService?.getCustomer === 'function'
+            ? await this.carrierService.getCustomer(custNo).catch(() => null)
+            : null;
+        const deliveryEmail = (targetEmail || String(customer?.email || liveCustomer?.email || '')).trim().toLowerCase();
+
+        if (!deliveryEmail || !deliveryEmail.includes('@')) {
+          return JSON.stringify({
+            success: false,
+            otpSent: false,
+            error: 'No valid registered email address is on file to verify this phone change. Please contact 1300 492 002 or info@justmobile.ai.',
+          });
+        }
+
+        const verificationsCol = this.db.getCollection('email_verifications');
+        if (typeof (verificationsCol as any).updateMany === 'function') {
+          await (verificationsCol as any)
+            .updateMany({ custNo, type: 'contact_update', used: false }, { $set: { used: true } })
+            .catch(() => {});
+        }
+
         const code = Math.floor(100000 + Math.random() * 900000).toString();
-        await this.db.getCollection('email_verifications').insertOne({
+        const insertRes: any = await verificationsCol.insertOne({
           custNo,
-          email: targetEmail || `phone:${targetPhone}`,
+          email: deliveryEmail,
+          deliveryEmail,
           newEmail: targetEmail,
-          newPhone: targetPhone,
+          newPhone: normalizedPhone,
           code,
           type: 'contact_update',
           expiresAt: new Date(Date.now() + 10 * 60 * 1000),
           used: false,
+          attempts: 0,
           createdAt: new Date(),
         });
+
         if (process.env.NODE_ENV !== 'production') {
-          this.logger.log(`[DEV] Contact update OTP for ${custNo} (${targetEmail || targetPhone}): ${code}`);
+          this.logger.log(`[DEV] Contact update OTP for ${custNo} (${deliveryEmail}): ${code}`);
         }
-        if (targetEmail && !targetEmail.endsWith('@example.com')) {
-          await this.mailService.sendVerificationCode(targetEmail, code).catch(() => {});
+        if (!deliveryEmail.endsWith('@example.com')) {
+          try {
+            const sent = await this.mailService.sendVerificationCode(deliveryEmail, code, customer?.name);
+            if (sent === false) {
+              throw new Error('SMTP delivery returned false');
+            }
+          } catch (mailErr: any) {
+            this.logger.warn(`Contact update OTP email failed for ${custNo}: ${mailErr?.message || mailErr}`);
+            if (insertRes?.insertedId && typeof verificationsCol.updateOne === 'function') {
+              await verificationsCol.updateOne({ _id: insertRes.insertedId }, { $set: { used: true } }).catch(() => {});
+            }
+            return JSON.stringify({
+              success: false,
+              otpSent: false,
+              error: 'We could not send the verification email right now. Please try again or contact 1300 492 002 / info@justmobile.ai.',
+            });
+          }
         }
+
+        const maskedDelivery = this.maskEmail(deliveryEmail);
         return JSON.stringify({
           otpSent: true,
-          target: targetEmail ? this.maskEmail(targetEmail) : this.maskPhone(targetPhone || ''),
-          message: 'Verification code dispatched for the new contact details. Ask the customer for the 6-digit code.',
+          deliveryChannel: 'email',
+          sentTo: maskedDelivery,
+          target: targetEmail ? maskedDelivery : this.maskPhone(normalizedPhone || ''),
+          message: targetEmail
+            ? `A 6-digit confirmation code has been sent to your new email (${maskedDelivery}). Ask the customer for the 6-digit code.`
+            : `A 6-digit confirmation code has been sent to your registered email (${maskedDelivery}) to approve updating your contact phone number to ${this.maskPhone(normalizedPhone || '')}. Ask the customer for that 6-digit code from their email.`,
         });
       }
 
@@ -895,27 +967,52 @@ export class ChatService {
         if (!(await this.hasRecentVerifiedChatSession(custNo, cleanSessionId))) {
           return JSON.stringify({ success: false, error: 'OTP verification required first.' });
         }
-        const rec = await this.db.getCollection('email_verifications').findOne(
+        const verificationsCol = this.db.getCollection('email_verifications');
+        const rec: any = await verificationsCol.findOne(
           { custNo, type: 'contact_update', used: false, expiresAt: { $gt: new Date() } },
           { sort: { createdAt: -1 } },
         );
-        if (!rec || String(rec.code) !== String(args.code || '').trim()) {
+        if (!rec) {
           return JSON.stringify({ success: false, error: 'Invalid or expired contact verification code.' });
         }
+
+        const attempts = (rec.attempts || 0) + 1;
+        if (String(rec.code) !== String(args.code || '').trim()) {
+          if (attempts >= 3) {
+            await verificationsCol.updateOne({ _id: rec._id }, { $set: { used: true, attempts } });
+            return JSON.stringify({
+              success: false,
+              error: 'Too many incorrect verification attempts. Please request a fresh confirmation code.',
+            });
+          }
+          await verificationsCol.updateOne({ _id: rec._id }, { $set: { attempts } });
+          return JSON.stringify({
+            success: false,
+            attemptsRemaining: 3 - attempts,
+            error: `Invalid verification code. ${3 - attempts} attempt(s) remaining.`,
+          });
+        }
+
+        const effectiveEmail = rec.newEmail || (args.newEmail ? String(args.newEmail).trim().toLowerCase() : undefined);
+        const effectivePhone = rec.newPhone || (args.newPhone ? this.normalizeChatMsn(args.newPhone) : undefined);
+
         const updateSet: Record<string, any> = { updatedAt: new Date() };
-        if (args.newEmail || rec.newEmail) updateSet.email = String(args.newEmail || rec.newEmail).trim().toLowerCase();
-        if (args.newPhone || rec.newPhone) updateSet.phone = String(args.newPhone || rec.newPhone).trim();
+        if (effectiveEmail) updateSet.email = String(effectiveEmail).trim().toLowerCase();
+        if (effectivePhone) updateSet.phone = String(effectivePhone).trim();
 
         await this.carrierService.updateCustomerDetails(custNo, {
           ...(updateSet.email !== undefined ? { email: updateSet.email } : {}),
           ...(updateSet.phone !== undefined ? { phone: updateSet.phone } : {}),
         });
-        await this.db.getCollection('email_verifications').updateOne({ _id: rec._id }, { $set: { used: true } });
-        await this.db.getCollection('users').updateOne({ custNo }, { $set: updateSet });
+        await verificationsCol.updateOne({ _id: rec._id }, { $set: { used: true } });
+        await this.db.getCollection('users').updateOne(this.buildCustNoFilter(custNo), { $set: updateSet });
         return JSON.stringify({
           success: true,
           referenceNumber: `CTC-JM-${Math.floor(100000 + Math.random() * 900000)}`,
-          updated: { email: updateSet.email ? this.maskEmail(updateSet.email) : undefined, phone: updateSet.phone ? this.maskPhone(updateSet.phone) : undefined },
+          updated: {
+            email: updateSet.email ? this.maskEmail(updateSet.email) : undefined,
+            phone: updateSet.phone ? this.maskPhone(updateSet.phone) : undefined,
+          },
         });
       }
 
@@ -949,7 +1046,7 @@ export class ChatService {
         });
 
         const usersCol = this.db.getCollection('users');
-        await usersCol.updateOne({ custNo }, { $set: updateSet });
+        await usersCol.updateOne(this.buildCustNoFilter(custNo), { $set: updateSet });
         const referenceNumber = `UPD-JM-${Math.floor(100000 + Math.random() * 900000)}`;
 
         return JSON.stringify({
@@ -1888,7 +1985,10 @@ export class ChatService {
             purpose: 'update_card',
             planName: 'JustMobile Direct Debit (Billing Cycle 28th)',
           };
-          if (/provide.*card|enter.*card.*details.*here|type.*card/i.test(reply)) {
+          if (
+            /provide.*card|enter.*card.*details.*here|type.*card/i.test(reply) ||
+            !/inline|below|frame|opened/i.test(reply)
+          ) {
             reply =
               "I've opened the secure Westpac QuickStream card form right below. Please enter your card details inside the encrypted frame to save your Direct Debit payment method (you can also manage it anytime in [My Account](/account)).";
           }
@@ -1911,5 +2011,38 @@ export class ChatService {
           "Sorry, I couldn't reach the AI assistant service just now. Please try again or reach us at info@justmobile.ai / 1300 492 002.",
       };
     }
+  }
+
+  async resetChatSession(sessionId?: string): Promise<{ success: boolean; reset: boolean }> {
+    const cleanSessionId = String(sessionId || '').trim();
+    if (!cleanSessionId || cleanSessionId === 'default-session') {
+      return { success: true, reset: false };
+    }
+
+    const sessionsCol = this.db.getCollection('chat_sessions');
+    if (typeof (sessionsCol as any).updateMany === 'function') {
+      await (sessionsCol as any)
+        .updateMany(
+          { sessionId: cleanSessionId, active: true },
+          { $set: { active: false, loggedOutAt: new Date() } },
+        )
+        .catch(() => {});
+    } else if (typeof sessionsCol.updateOne === 'function') {
+      await sessionsCol
+        .updateOne(
+          { sessionId: cleanSessionId, active: true },
+          { $set: { active: false, loggedOutAt: new Date() } },
+        )
+        .catch(() => {});
+    }
+
+    const reservedCol = this.db.getCollection('chat_reserved_numbers');
+    if (typeof (reservedCol as any).deleteMany === 'function') {
+      await (reservedCol as any).deleteMany({ sessionId: cleanSessionId }).catch(() => {});
+    } else if (typeof (reservedCol as any).deleteOne === 'function') {
+      await (reservedCol as any).deleteOne({ sessionId: cleanSessionId }).catch(() => {});
+    }
+
+    return { success: true, reset: true };
   }
 }

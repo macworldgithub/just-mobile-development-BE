@@ -1264,4 +1264,226 @@ describe('Octane UtbOTP Nested Parsing & Chat Verified Profile Auto-Fetch', () =
     await authService.getAdminStats('Bearer admin-jwt');
     expect(getAllCustomersFromOctane).toHaveBeenCalledTimes(3);
   });
+
+  it('ChatService request_contact_update_otp sends phone-update OTP to registered email, fails closed on SMTP error, and confirm_contact_update enforces retries and numeric custNo', async () => {
+    const insertedOtps: any[] = [];
+    const verificationUpdateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 });
+    const usersUpdateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 });
+    const mockDb: any = {
+      getCollection: jest.fn((name: string) => {
+        if (name === 'chat_sessions') {
+          return {
+            findOne: jest.fn().mockResolvedValue({
+              sessionId: 'sess-contact-1',
+              custNo: '551059',
+              active: true,
+              expiresAt: new Date(Date.now() + 600_000),
+            }),
+          };
+        }
+        if (name === 'users') {
+          return {
+            findOne: jest.fn().mockResolvedValue({
+              custNo: 551059,
+              name: 'Yaseen Jamal',
+              email: 'yaseen@neximet.com',
+              phone: '0411111111',
+            }),
+            updateOne: usersUpdateOne,
+          };
+        }
+        if (name === 'email_verifications') {
+          return {
+            updateMany: jest.fn().mockResolvedValue({ modifiedCount: 0 }),
+            insertOne: jest.fn(async (doc: any) => {
+              const id = `otp-${insertedOtps.length + 1}`;
+              const stored = { _id: id, ...doc };
+              insertedOtps.push(stored);
+              return { insertedId: id };
+            }),
+            findOne: jest.fn(async () => insertedOtps.find((o) => !o.used) || null),
+            updateOne: jest.fn(async (filter: any, update: any) => {
+              verificationUpdateOne(filter, update);
+              const target = insertedOtps.find((o) => o._id === filter?._id);
+              if (target && update?.$set) Object.assign(target, update.$set);
+              return { modifiedCount: 1 };
+            }),
+          };
+        }
+        return { findOne: jest.fn().mockResolvedValue(null) };
+      }),
+    };
+
+    const sendVerificationCode = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('SMTP timeout'))
+      .mockResolvedValue(true);
+    const updateCustomerDetails = jest.fn().mockResolvedValue({ syncedWithOctane: true });
+
+    const chatService = new ChatService(
+      mockDb,
+      { sendVerificationCode } as any,
+      { updateCustomerDetails } as any,
+      {} as any,
+      {} as any,
+    );
+
+    // Fail closed when SMTP fails
+    const failRes = JSON.parse(
+      await chatService.executeToolCall(
+        'request_contact_update_otp',
+        JSON.stringify({ custNo: '551059', newPhone: '0412 345 678' }),
+        [],
+        'sess-contact-1',
+      ),
+    );
+    expect(failRes.otpSent).toBe(false);
+    expect(insertedOtps[0].used).toBe(true);
+
+    // Succeeds and sends confirmation code to registered email
+    const okRes = JSON.parse(
+      await chatService.executeToolCall(
+        'request_contact_update_otp',
+        JSON.stringify({ custNo: '551059', newPhone: '+61 412 345 678' }),
+        [],
+        'sess-contact-1',
+      ),
+    );
+    expect(okRes).toEqual(
+      expect.objectContaining({
+        otpSent: true,
+        deliveryChannel: 'email',
+      }),
+    );
+    expect(sendVerificationCode).toHaveBeenLastCalledWith(
+      'yaseen@neximet.com',
+      insertedOtps[1].code,
+      'Yaseen Jamal',
+    );
+
+    // Wrong OTP decrements attemptsRemaining, then valid OTP updates numeric+string custNo filter
+    const wrongRes = JSON.parse(
+      await chatService.executeToolCall(
+        'confirm_contact_update',
+        JSON.stringify({ custNo: '551059', code: '000000' }),
+        [],
+        'sess-contact-1',
+      ),
+    );
+    expect(wrongRes.success).toBe(false);
+    expect(wrongRes.attemptsRemaining).toBe(2);
+
+    const confirmRes = JSON.parse(
+      await chatService.executeToolCall(
+        'confirm_contact_update',
+        JSON.stringify({ custNo: '551059', code: insertedOtps[1].code }),
+        [],
+        'sess-contact-1',
+      ),
+    );
+    expect(confirmRes.success).toBe(true);
+    expect(updateCustomerDetails).toHaveBeenCalledWith('551059', { phone: '0412345678' });
+    expect(usersUpdateOne).toHaveBeenCalledWith(
+      { $or: [{ custNo: '551059' }, { custNo: 551059 }] },
+      expect.objectContaining({
+        $set: expect.objectContaining({ phone: '0412345678' }),
+      }),
+    );
+  });
+
+  it('CarrierService.getOctaneBillingCycleDate rolls over to next month on days 28-31 in Australia/Sydney', () => {
+    const service = new CarrierService({ getCollection: jest.fn() } as any, {} as any) as any;
+    expect(service.getOctaneBillingCycleDate(new Date('2026-11-24T05:00:00Z'))).toBe('27-11-2026');
+    expect(service.getOctaneBillingCycleDate(new Date('2026-11-27T05:00:00Z'))).toBe('27-11-2026');
+    expect(service.getOctaneBillingCycleDate(new Date('2026-11-28T05:00:00Z'))).toBe('27-12-2026');
+    expect(service.getOctaneBillingCycleDate(new Date('2026-12-29T05:00:00Z'))).toBe('27-01-2027');
+  });
+
+  it('ChatService.resetChatSession deactivates chat_sessions and clears reserved numbers for the sessionId', async () => {
+    const updateMany = jest.fn().mockResolvedValue({ modifiedCount: 1 });
+    const deleteMany = jest.fn().mockResolvedValue({ deletedCount: 1 });
+    const mockDb: any = {
+      getCollection: jest.fn((name: string) => {
+        if (name === 'chat_sessions') return { updateMany };
+        if (name === 'chat_reserved_numbers') return { deleteMany };
+        return {};
+      }),
+    };
+    const chatService = new ChatService(mockDb, {} as any, {} as any, {} as any, {} as any);
+
+    const res = await chatService.resetChatSession('widget-abc-123');
+    expect(res).toEqual({ success: true, reset: true });
+    expect(updateMany).toHaveBeenCalledWith(
+      { sessionId: 'widget-abc-123', active: true },
+      expect.objectContaining({
+        $set: expect.objectContaining({ active: false }),
+      }),
+    );
+    expect(deleteMany).toHaveBeenCalledWith({ sessionId: 'widget-abc-123' });
+  });
+
+  it('ChatService.generateResponse deterministically opens QuickStream iframe for "set payment" and "update my payment card for my plan" and rewrites deflecting replies', async () => {
+    const prevKey = process.env.OPENAI_KEY;
+    process.env.OPENAI_KEY = 'test-openai-key';
+    const originalFetch = global.fetch;
+
+    try {
+      const mockDb: any = {
+        getCollection: jest.fn(() => ({
+          findOne: jest.fn().mockResolvedValue({
+            sessionId: 'sess-qs-1',
+            custNo: '551059',
+            active: true,
+            expiresAt: new Date(Date.now() + 600_000),
+          }),
+          updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
+        })),
+      };
+      const issueTokenForCustomer = jest.fn().mockResolvedValue('jwt-551059');
+      const chatService = new ChatService(
+        mockDb,
+        {} as any,
+        {} as any,
+        {} as any,
+        { issueTokenForCustomer } as any,
+      );
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content: 'Please go to My Account to update your card.',
+              },
+            },
+          ],
+        }),
+      }) as any;
+
+      for (const prompt of ['set payment', 'update my payment card for my plan']) {
+        const res: any = await chatService.generateResponse(
+          [{ role: 'user', content: prompt }],
+          'sess-qs-1',
+        );
+        expect(res.uiAction).toEqual(
+          expect.objectContaining({
+            type: 'QUICKSTREAM_PAYMENT',
+            custNo: '551059',
+            purpose: 'update_card',
+            authToken: 'jwt-551059',
+          }),
+        );
+        expect(res.reply).toMatch(/opened the secure Westpac QuickStream card form right below/i);
+      }
+    } finally {
+      global.fetch = originalFetch;
+      if (prevKey === undefined) {
+        delete process.env.OPENAI_KEY;
+      } else {
+        process.env.OPENAI_KEY = prevKey;
+      }
+    }
+  });
 });

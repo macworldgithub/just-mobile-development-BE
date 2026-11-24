@@ -1074,11 +1074,28 @@ export class CarrierService {
     return clean;
   }
 
-  private getOctaneBillingCycleDate(): string {
-    const now = new Date();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const year = now.getFullYear();
-    return `27-${month}-${year}`;
+  private getOctaneBillingCycleDate(referenceDate: Date = new Date()): string {
+    const parts = new Intl.DateTimeFormat('en-AU', {
+      timeZone: 'Australia/Sydney',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(referenceDate);
+
+    let year = Number(parts.find((p) => p.type === 'year')?.value);
+    let month = Number(parts.find((p) => p.type === 'month')?.value);
+    const day = Number(parts.find((p) => p.type === 'day')?.value);
+
+    // Billing cycle runs 28th -> 27th; on days 28-31 target the 27th of next month
+    if (day >= 28) {
+      month += 1;
+      if (month > 12) {
+        month = 1;
+        year += 1;
+      }
+    }
+
+    return `27-${String(month).padStart(2, '0')}-${year}`;
   }
 
   private async hydrateOrderCustomerProfile(
@@ -2400,10 +2417,28 @@ export class CarrierService {
 
     const cleanCustNo = custNo.trim();
     const ordersCol = this.db.getCollection<OrderRecord>('orders');
-    const [existingOrder, userDoc] = await Promise.all([
-      ordersCol.findOne({ custNo: cleanCustNo }, { sort: { updatedAt: -1 } }),
+    const requestedMsn = dto.msn ? this.normalizeMsn(dto.msn) : '';
+    const [matchedByMsn, fallbackOrder, userDoc] = await Promise.all([
+      requestedMsn
+        ? ordersCol.findOne(
+            {
+              custNo: cleanCustNo,
+              msn: requestedMsn,
+              status: { $nin: ['CANCELLED', 'DISCONNECTED'] as any },
+            },
+            { sort: { updatedAt: -1 } },
+          )
+        : Promise.resolve(null),
+      ordersCol.findOne(
+        {
+          custNo: cleanCustNo,
+          status: { $nin: ['CANCELLED', 'DISCONNECTED'] as any },
+        },
+        { sort: { updatedAt: -1 } },
+      ),
       this.findUserDoc(cleanCustNo),
     ]);
+    const existingOrder = matchedByMsn || fallbackOrder;
 
     const cleanMsn = (dto.msn || existingOrder?.msn || userDoc?.phone || '0491570006').replace(/\s+/g, '');
     const isLive = process.env.TELCO_LIVE_CREATE === 'true' && /^\d+$/.test(cleanCustNo);
@@ -2455,8 +2490,13 @@ export class CarrierService {
     const effectivePlanNo = targetPlanNo || '11144157';
 
     if (existingOrder) {
-      await ordersCol.updateMany(
-        { custNo: cleanCustNo },
+      const targetOrderFilter = (existingOrder as any)._id
+        ? { _id: (existingOrder as any)._id }
+        : existingOrder.orderId
+          ? { orderId: existingOrder.orderId }
+          : { custNo: cleanCustNo, msn: effectiveMsn };
+      await ordersCol.updateOne(
+        targetOrderFilter,
         {
           $set: {
             planNo: effectivePlanNo,
